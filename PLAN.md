@@ -25,14 +25,15 @@
 - [x] Print debug cada ~30 chunks (~1 seg): chunk#, samples=512, rms
 - [x] Verificar: al iniciar se ven prints de chunks, al detener se paran
 
-## Fase 3 — VAD (Voice Activity Detection)
-- [ ] Implementar VoiceActivityDetector en src/audio/vad.py
-- [ ] Cargar silero-vad via torch.hub
-- [ ] Procesar chunks de 512 samples (30ms a 16kHz)
-- [ ] Acumular buffer durante speech, retornar segmento al detectar silencio
-- [ ] Integrar con captura: solo loguear "VOZ DETECTADA" / "SILENCIO" en consola
-- [ ] Conectar indicador visual de voz en la UI
-- [ ] Verificar: al hablar aparece "VOZ DETECTADA", al callar "SILENCIO"
+## Fase 3 — VAD (Voice Activity Detection) ✓
+- [x] Implementar VoiceActivityDetector en src/audio/vad.py
+- [x] Cargar silero-vad via torch.hub (trust_repo=True, deps: torchaudio, packaging)
+- [x] Procesar chunks de 512 samples (30ms a 16kHz) — silencio→False OK
+- [x] Crear VADWorker (QThread) en src/audio/vad_worker.py — loguea solo cambios de estado
+- [x] Integrar con captura: loguea "VOZ DETECTADA" / "SILENCIO" en consola
+- [x] Conectar vad_activity Signal → _update_vad_indicator → LED verde/gris
+- [x] VAD se carga en background (VADLoader QThread) — botón Iniciar habilitado al terminar
+- [x] Verificar: al hablar LED se pone verde, al callar vuelve a gris; consola muestra cambios
 
 ## Fase 4 — Transcripción Básica (por segmentos)
 - [ ] Implementar TranscriptionEngine en src/transcription/engine.py

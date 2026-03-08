@@ -7,7 +7,8 @@ class VoiceActivityDetector:
     def __init__(self, threshold: float = 0.5, sample_rate: int = 16000):
         try:
             self.model, _ = torch.hub.load(
-                "snakers4/silero-vad", "silero_vad", force_reload=False
+                "snakers4/silero-vad", "silero_vad",
+                force_reload=False, trust_repo=True
             )
         except Exception as e:
             raise RuntimeError(

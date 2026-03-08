@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QToolBar, QPushButton, QComboBox, QLabel,
     QFrame, QSizePolicy, QMessageBox, QFileDialog
 )
-from PySide6.QtCore import Qt, QSize, Slot
+from PySide6.QtCore import Qt, QSize, Slot, QThread, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 
 from src.ui.transcript_view import TranscriptView
@@ -16,16 +16,35 @@ MODELOS = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
 IDIOMAS = [("Español", "es"), ("Inglés", "en"), ("Automático", None)]
 
 
+class VADLoader(QThread):
+    """Carga VoiceActivityDetector en background para no bloquear la UI."""
+    loaded = Signal(object)   # emite el vad listo
+    failed = Signal(str)
+
+    def __init__(self, threshold: float = 0.5):
+        super().__init__()
+        self._threshold = threshold
+
+    def run(self):
+        try:
+            from src.audio.vad import VoiceActivityDetector
+            vad = VoiceActivityDetector(threshold=self._threshold)
+            self.loaded.emit(vad)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config=None):
         super().__init__()
         self._config = config
         self._capture = None
-        self._worker = None
-        self._audio_queue = None
-        self._engine = None
         self._vad = None
+        self._vad_worker = None
+        self._worker = None          # transcription worker (Fase 5)
+        self._audio_queue = None
         self._is_running = False
+        self._vad_loader = None
 
         self.setWindowTitle("Transcriptor en Tiempo Real")
         self.resize(960, 640)
@@ -33,7 +52,8 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_shortcuts()
         self._populate_devices()
-        self.statusBar().showMessage("Listo")
+        self.statusBar().showMessage("Cargando VAD...")
+        self._load_vad()
 
     # -------------------------------------------------------------------------
     # Construcción de la UI
@@ -45,7 +65,6 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
-        # --- Toolbar principal ---
         toolbar = QToolBar("Principal")
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(20, 20))
@@ -53,6 +72,7 @@ class MainWindow(QMainWindow):
 
         self.btn_iniciar = QPushButton("▶  Iniciar")
         self.btn_iniciar.setFixedHeight(32)
+        self.btn_iniciar.setEnabled(False)   # deshabilitado hasta que VAD cargue
         self.btn_iniciar.setStyleSheet(
             "QPushButton { background: #4CAF50; color: white; border-radius: 4px; padding: 0 12px; font-weight: bold; }"
             "QPushButton:hover { background: #43A047; }"
@@ -82,7 +102,6 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        # Indicador VAD
         self._vad_indicator = QFrame()
         self._vad_indicator.setFixedSize(16, 16)
         self._vad_indicator.setStyleSheet("background: #666; border-radius: 8px;")
@@ -96,7 +115,6 @@ class MainWindow(QMainWindow):
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
 
-        # --- Panel de controles ---
         ctrl_bar = QHBoxLayout()
         ctrl_bar.setSpacing(12)
 
@@ -120,15 +138,12 @@ class MainWindow(QMainWindow):
         ctrl_bar.addWidget(self.cb_idioma)
 
         ctrl_bar.addStretch()
-
         root.addLayout(ctrl_bar)
 
-        # --- Área de transcripción ---
         self._transcript_view = TranscriptView()
         self._transcript_view.setMinimumHeight(400)
         root.addWidget(self._transcript_view, stretch=1)
 
-        # --- Conexiones básicas de UI ---
         self.btn_limpiar.clicked.connect(self._on_limpiar)
         self.btn_iniciar.clicked.connect(self._on_iniciar)
         self.btn_detener.clicked.connect(self._on_detener)
@@ -167,26 +182,50 @@ class MainWindow(QMainWindow):
     # Dispositivos de audio
     # -------------------------------------------------------------------------
     def _populate_devices(self):
-        """Llena el combo de dispositivos con los inputs reales del sistema."""
         try:
-            temp_cfg = AudioConfig()
-            temp_capture = AudioCapture(temp_cfg, queue.Queue())
+            temp_capture = AudioCapture(AudioConfig(), queue.Queue())
             devices = temp_capture.list_devices()
             self.cb_dispositivo.clear()
             self.cb_dispositivo.addItem("Dispositivo predeterminado", None)
             for dev in devices:
                 label = f"[{dev['index']}] {dev['name']} ({dev['channels']}ch)"
                 self.cb_dispositivo.addItem(label, dev["index"])
-            self.statusBar().showMessage(f"{len(devices)} dispositivo(s) de entrada encontrados")
         except Exception as e:
             self.cb_dispositivo.addItem("Error al listar dispositivos", None)
-            self.statusBar().showMessage(f"Error al listar dispositivos: {e}")
+            print(f"[MainWindow] Error listando dispositivos: {e}")
 
     def _selected_device_index(self) -> int | None:
         return self.cb_dispositivo.currentData()
 
     # -------------------------------------------------------------------------
-    # Iniciar / Detener captura
+    # Carga del VAD en background
+    # -------------------------------------------------------------------------
+    def _load_vad(self):
+        self._vad_loader = VADLoader(threshold=0.5)
+        self._vad_loader.loaded.connect(self._on_vad_loaded)
+        self._vad_loader.failed.connect(self._on_vad_failed)
+        self._vad_loader.start()
+
+    @Slot(object)
+    def _on_vad_loaded(self, vad):
+        self._vad = vad
+        self.btn_iniciar.setEnabled(True)
+        self.statusBar().showMessage("VAD listo. Listo para transcribir.")
+        print("[MainWindow] Silero VAD cargado OK")
+
+    @Slot(str)
+    def _on_vad_failed(self, error: str):
+        self.statusBar().showMessage(f"Error cargando VAD: {error}")
+        QMessageBox.critical(
+            self, "Error al cargar VAD",
+            f"No se pudo cargar Silero VAD:\n{error}\n\n"
+            "Asegúrate de tener conexión a internet la primera vez."
+        )
+        # Habilitamos igualmente para poder testear sin VAD (Fase 2 fallback)
+        self.btn_iniciar.setEnabled(True)
+
+    # -------------------------------------------------------------------------
+    # Iniciar / Detener
     # -------------------------------------------------------------------------
     @Slot()
     def _on_iniciar(self):
@@ -205,11 +244,23 @@ class MainWindow(QMainWindow):
             self._capture = None
             return
 
+        # Arrancar VAD worker si el VAD está disponible
+        if self._vad is not None:
+            from src.audio.vad_worker import VADWorker
+            self._vad_worker = VADWorker(self._audio_queue, self._vad)
+            self._vad_worker.vad_activity.connect(self._update_vad_indicator)
+            self._vad_worker.status_changed.connect(self.statusBar().showMessage)
+            self._vad_worker.error_occurred.connect(
+                lambda e: self.statusBar().showMessage(f"Error VAD: {e}")
+            )
+            self._vad_worker.start()
+        else:
+            self.statusBar().showMessage("Capturando (sin VAD)...")
+
         self._is_running = True
         self.btn_iniciar.setEnabled(False)
         self.btn_detener.setEnabled(True)
-        self.statusBar().showMessage("Capturando audio... (ver consola para chunks)")
-        print(f"[Fase 2] Captura iniciada — dispositivo: {device_index}")
+        print(f"[Fase 3] Iniciado — dispositivo: {device_index}, VAD: {'activo' if self._vad else 'no disponible'}")
 
     @Slot()
     def _on_detener(self):
@@ -220,16 +271,23 @@ class MainWindow(QMainWindow):
             self._worker.stop()
             self._worker = None
 
+        if self._vad_worker is not None:
+            self._vad_worker.stop()
+            self._vad_worker = None
+
         if self._capture is not None:
             self._capture.stop()
             self._capture = None
+
+        if self._vad is not None:
+            self._vad.reset()
 
         self._is_running = False
         self.btn_iniciar.setEnabled(True)
         self.btn_detener.setEnabled(False)
         self._update_vad_indicator(False)
         self.statusBar().showMessage("Detenido")
-        print("[Fase 2] Captura detenida")
+        print("[Fase 3] Detenido")
 
     @Slot()
     def _on_toggle_space(self):
@@ -285,7 +343,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Configuración guardada. Reinicia la transcripción.")
 
     # -------------------------------------------------------------------------
-    # VAD indicator (se usará en Fase 3)
+    # Indicador VAD
     # -------------------------------------------------------------------------
     @Slot(bool)
     def _update_vad_indicator(self, is_speech: bool):
@@ -300,4 +358,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if self._is_running:
             self._on_detener()
+        if self._vad_loader and self._vad_loader.isRunning():
+            self._vad_loader.wait()
         event.accept()
