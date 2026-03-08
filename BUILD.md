@@ -90,6 +90,24 @@ Prueba en modo consola para ver el error:
 3. Ejecuta desde PowerShell para ver el traceback.
 4. Corrige el error, luego vuelve a `console=False`.
 
+### `DLL load failed while importing _ssl` / error al descargar modelos
+El intérprete de Python gestionado por `uv` guarda sus DLLs de OpenSSL fuera
+del `.venv`. PyInstaller no las encuentra automáticamente.
+
+El `transcriptor.spec` ya las incluye desde:
+```
+%USERPROFILE%\AppData\Roaming\uv\python\cpython-3.11-windows-x86_64-none\DLLs\
+  libssl-3-x64.dll
+  libcrypto-3-x64.dll
+  _ssl.pyd
+```
+Si usas una versión diferente de Python/uv, ajusta la ruta en `transcriptor.spec`
+(variable `_UV_PYTHON_DLLS`).
+
+### `'NoneType' object has no attribute 'write'` al cargar VAD o Whisper
+Ocurre en modo `console=False` porque `sys.stdout`/`sys.stderr` son `None`.
+Ya está corregido en `src/audio/vad.py` y `src/transcription/engine.py`.
+
 ### Antivirus bloquea el exe
 PyInstaller genera falsos positivos en algunos antivirus. Es un problema conocido.
 Puedes firmarlo con un certificado de código (Code Signing Certificate) para evitarlo.
