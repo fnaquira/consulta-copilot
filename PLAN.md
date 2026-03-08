@@ -16,14 +16,14 @@
 - [x] Verificar: la app abre con todos los controles visibles y funcionales (sin lógica aún)
 - [x] Stubs creados: capture.py, vad.py, engine.py, worker.py, export.py, config.py
 
-## Fase 2 — Captura de Audio
-- [ ] Implementar AudioCapture en src/audio/capture.py
-- [ ] list_devices() retorna dispositivos con input channels
-- [ ] start(device_index) inicia InputStream, pushea chunks a queue
-- [ ] stop() cierra stream limpiamente
-- [ ] Poblar QComboBox de dispositivos con datos reales
-- [ ] Test manual: botón Iniciar captura audio, print chunks en consola, botón Detener para
-- [ ] Verificar: al iniciar se ven prints de chunks llegando, al detener se paran
+## Fase 2 — Captura de Audio ✓
+- [x] Implementar AudioCapture en src/audio/capture.py
+- [x] list_devices() retorna 8 dispositivos con input channels
+- [x] start(device_index) inicia InputStream, pushea chunks a queue con overflow protection
+- [x] stop() cierra stream limpiamente
+- [x] Poblar QComboBox de dispositivos con datos reales (_populate_devices en MainWindow)
+- [x] Print debug cada ~30 chunks (~1 seg): chunk#, samples=512, rms
+- [x] Verificar: al iniciar se ven prints de chunks, al detener se paran
 
 ## Fase 3 — VAD (Voice Activity Detection)
 - [ ] Implementar VoiceActivityDetector en src/audio/vad.py

@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
+import queue
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QToolBar, QPushButton, QComboBox, QLabel, QStatusBar,
+    QToolBar, QPushButton, QComboBox, QLabel,
     QFrame, QSizePolicy, QMessageBox, QFileDialog
 )
 from PySide6.QtCore import Qt, QSize, Slot
-from PySide6.QtGui import QAction, QKeySequence, QFont, QColor
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 
 from src.ui.transcript_view import TranscriptView
+from src.audio.capture import AudioCapture, AudioConfig
 
 
 MODELOS = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
@@ -30,6 +32,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._build_shortcuts()
+        self._populate_devices()
         self.statusBar().showMessage("Listo")
 
     # -------------------------------------------------------------------------
@@ -89,7 +92,6 @@ class MainWindow(QMainWindow):
         lbl_vad.setStyleSheet("color: #555; font-size: 12px;")
         toolbar.addWidget(lbl_vad)
 
-        # Espaciador
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
@@ -107,8 +109,7 @@ class MainWindow(QMainWindow):
 
         ctrl_bar.addWidget(QLabel("Dispositivo audio:"))
         self.cb_dispositivo = QComboBox()
-        self.cb_dispositivo.setMinimumWidth(200)
-        self.cb_dispositivo.addItem("(Cargando dispositivos...)", None)
+        self.cb_dispositivo.setMinimumWidth(220)
         ctrl_bar.addWidget(self.cb_dispositivo)
 
         ctrl_bar.addWidget(QLabel("Idioma:"))
@@ -129,13 +130,12 @@ class MainWindow(QMainWindow):
 
         # --- Conexiones básicas de UI ---
         self.btn_limpiar.clicked.connect(self._on_limpiar)
-        self.btn_iniciar.clicked.connect(self._on_iniciar_click)
-        self.btn_detener.clicked.connect(self._on_detener_click)
+        self.btn_iniciar.clicked.connect(self._on_iniciar)
+        self.btn_detener.clicked.connect(self._on_detener)
 
     def _build_menu(self):
         menubar = self.menuBar()
 
-        # Menú Archivo
         menu_archivo = menubar.addMenu("Archivo")
 
         act_exportar_txt = QAction("Exportar como TXT...", self)
@@ -154,47 +154,82 @@ class MainWindow(QMainWindow):
         act_salir.triggered.connect(self.close)
         menu_archivo.addAction(act_salir)
 
-        # Menú Configuración
         menu_config = menubar.addMenu("Configuración")
         act_settings = QAction("Preferencias...", self)
         act_settings.triggered.connect(self._on_abrir_settings)
         menu_config.addAction(act_settings)
 
     def _build_shortcuts(self):
-        from PySide6.QtGui import QShortcut
         sc_space = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         sc_space.activated.connect(self._on_toggle_space)
 
     # -------------------------------------------------------------------------
-    # Slots de UI (lógica llegará en fases posteriores)
+    # Dispositivos de audio
+    # -------------------------------------------------------------------------
+    def _populate_devices(self):
+        """Llena el combo de dispositivos con los inputs reales del sistema."""
+        try:
+            temp_cfg = AudioConfig()
+            temp_capture = AudioCapture(temp_cfg, queue.Queue())
+            devices = temp_capture.list_devices()
+            self.cb_dispositivo.clear()
+            self.cb_dispositivo.addItem("Dispositivo predeterminado", None)
+            for dev in devices:
+                label = f"[{dev['index']}] {dev['name']} ({dev['channels']}ch)"
+                self.cb_dispositivo.addItem(label, dev["index"])
+            self.statusBar().showMessage(f"{len(devices)} dispositivo(s) de entrada encontrados")
+        except Exception as e:
+            self.cb_dispositivo.addItem("Error al listar dispositivos", None)
+            self.statusBar().showMessage(f"Error al listar dispositivos: {e}")
+
+    def _selected_device_index(self) -> int | None:
+        return self.cb_dispositivo.currentData()
+
+    # -------------------------------------------------------------------------
+    # Iniciar / Detener captura
     # -------------------------------------------------------------------------
     @Slot()
-    def _on_iniciar_click(self):
-        self._on_iniciar()
-
-    @Slot()
-    def _on_detener_click(self):
-        self._on_detener()
-
     def _on_iniciar(self):
-        """Inicia captura + transcripción. Implementado en fases posteriores."""
+        if self._is_running:
+            return
+
+        device_index = self._selected_device_index()
+        self._audio_queue = queue.Queue(maxsize=500)
+        audio_cfg = AudioConfig()
+        self._capture = AudioCapture(audio_cfg, self._audio_queue)
+
+        try:
+            self._capture.start(device_index)
+        except Exception as e:
+            QMessageBox.critical(self, "Error de audio", f"No se pudo iniciar la captura:\n{e}")
+            self._capture = None
+            return
+
+        self._is_running = True
         self.btn_iniciar.setEnabled(False)
         self.btn_detener.setEnabled(True)
-        self._is_running = True
-        self.statusBar().showMessage("Escuchando...")
-
-    def _on_detener(self):
-        """Detiene captura + transcripción. Implementado en fases posteriores."""
-        self.btn_iniciar.setEnabled(True)
-        self.btn_detener.setEnabled(False)
-        self._is_running = False
-        self.statusBar().showMessage("Detenido")
-        self._update_vad_indicator(False)
+        self.statusBar().showMessage("Capturando audio... (ver consola para chunks)")
+        print(f"[Fase 2] Captura iniciada — dispositivo: {device_index}")
 
     @Slot()
-    def _on_limpiar(self):
-        self._transcript_view.clear_all()
-        self.statusBar().showMessage("Transcripción limpiada")
+    def _on_detener(self):
+        if not self._is_running:
+            return
+
+        if self._worker is not None:
+            self._worker.stop()
+            self._worker = None
+
+        if self._capture is not None:
+            self._capture.stop()
+            self._capture = None
+
+        self._is_running = False
+        self.btn_iniciar.setEnabled(True)
+        self.btn_detener.setEnabled(False)
+        self._update_vad_indicator(False)
+        self.statusBar().showMessage("Detenido")
+        print("[Fase 2] Captura detenida")
 
     @Slot()
     def _on_toggle_space(self):
@@ -203,6 +238,14 @@ class MainWindow(QMainWindow):
         else:
             self._on_iniciar()
 
+    @Slot()
+    def _on_limpiar(self):
+        self._transcript_view.clear_all()
+        self.statusBar().showMessage("Transcripción limpiada")
+
+    # -------------------------------------------------------------------------
+    # Exportación
+    # -------------------------------------------------------------------------
     @Slot()
     def _on_exportar_txt(self):
         texto = self._transcript_view.get_all_text().strip()
@@ -225,7 +268,7 @@ class MainWindow(QMainWindow):
     def _on_exportar_srt(self):
         QMessageBox.information(
             self, "Exportar SRT",
-            "La exportación SRT requiere timestamps (disponible en Fase 7)."
+            "La exportación SRT con timestamps estará disponible en Fase 7."
         )
 
     @Slot()
@@ -241,6 +284,9 @@ class MainWindow(QMainWindow):
                 setattr(self._config, k, v)
             self.statusBar().showMessage("Configuración guardada. Reinicia la transcripción.")
 
+    # -------------------------------------------------------------------------
+    # VAD indicator (se usará en Fase 3)
+    # -------------------------------------------------------------------------
     @Slot(bool)
     def _update_vad_indicator(self, is_speech: bool):
         if is_speech:
