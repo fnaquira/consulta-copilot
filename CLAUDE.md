@@ -33,41 +33,58 @@ uv pip install torch torchaudio --python .venv/Scripts/python.exe --index-url ht
 
 ## Architecture
 
-The app is a real-time audio transcriber. The data flow is:
+The app is a real-time audio transcriber supporting two simultaneous audio sources (microphone + system audio). The data flow is:
 
 ```
-Microphone → AudioCapture (sounddevice) → queue.Queue
+Microphone → AudioCapture (sounddevice) → mic_queue
+System audio → SystemAudioCapture (PyAudioWPatch/sounddevice) → system_queue
     → SlidingWindowWorker (QThread)
-        → VoiceActivityDetector (silero-vad) — per 512-sample chunk
-        → rolling audio buffer (max 5 sec)
-        → TranscriptionEngine (faster-whisper) — every ~1 sec if speech detected
-        → text_confirmed Signal → TranscriptView.append_confirmed()  [black text]
-        → text_partial Signal  → TranscriptView.update_partial()     [grey italic]
+        → per source: VoiceActivityDetector (silero-vad) — per 512-sample chunk
+        → per source: rolling audio buffer (max 5 sec)
+        → per source: TranscriptionEngine (faster-whisper) — every ~1 sec if speech
+        → text_confirmed Signal(label, text) → TranscriptView.append_confirmed()
+        → text_partial   Signal(label, text) → TranscriptView.update_partial()
+        → vad_activity   Signal(source_name, bool)
 ```
+
+### Dual audio sources
+
+- **Mic** (`AudioCapture` / `src/audio/capture.py`): captures the microphone via sounddevice.
+- **System** (`SystemAudioCapture` / `src/audio/system_capture.py`): captures what plays through the speakers. Backend differs by OS:
+  - Windows: PyAudioWPatch + WASAPI loopback (install with `uv pip install PyAudioWPatch scipy`)
+  - Linux: sounddevice "Monitor of ..." devices (PulseAudio/PipeWire)
+  - macOS: manual selection; BlackHole virtual device recommended
+  - System audio is resampled to 16kHz with scipy if the native device rate differs.
 
 ### Threading model
 
 All heavy work runs in QThreads, never blocking the Qt main thread:
-- `VADLoader` — loads silero-vad on startup; enables Iniciar button when done
+- `VADLoader` / `DualVADLoader` — loads one or two silero-vad instances on startup; enables Iniciar when done
 - `ModelLoader` — loads the Whisper model when Iniciar is pressed
-- `SlidingWindowWorker` — the main loop: drains queue, runs VAD, triggers transcription
+- `SlidingWindowWorker` — main loop: processes mic and system streams sequentially (faster-whisper is NOT thread-safe)
 - Signals/Slots are the only cross-thread communication. Never touch Qt widgets from workers.
 
 ### Key design decisions
 
-- **VAD role**: Silero VAD only signals presence/absence of speech (for the LED indicator and to gate transcription). It does NOT segment audio — the worker uses a time-based rolling buffer instead.
-- **Sliding window**: The buffer holds the last 5 seconds of audio. Text older than `confirm_threshold` (3 sec) is proportionally split: confirmed words are appended permanently; recent words remain as mutable partial text.
-- **initial_prompt**: The last 200 chars of confirmed text are passed to Whisper on each call, giving it context to avoid hallucinations at boundaries.
-- **Chunk size**: Exactly 512 samples (30ms at 16kHz) — required by silero-vad. `blocksize=512` in `AudioCapture.start()` guarantees this.
-- **Queue overflow**: If the queue fills (maxsize=500), the oldest chunk is discarded before adding the new one (`audio_queue.get_nowait()` then `put()`).
+- **Dual stream state**: Each audio source is encapsulated in `_AudioStream` (worker.py), with its own buffer, VAD, confirmed text, and timing. The worker iterates `self._streams` each cycle.
+- **VAD role**: Silero VAD only signals presence/absence of speech (LED indicators, gating transcription). It does NOT segment audio — the worker uses time-based rolling buffers.
+- **Sliding window**: Buffer holds the last 5 seconds of audio. Text older than `confirm_threshold` (3 sec) is proportionally split: confirmed words are appended permanently; recent words remain mutable partial text.
+- **initial_prompt**: The last 200 chars of confirmed text are passed to Whisper on each call for context continuity.
+- **Chunk size**: Exactly 512 samples (30ms at 16kHz) — required by silero-vad. Guaranteed by `blocksize=512` for mic; SystemAudioCapture accumulates a leftover buffer to emit exact 512-sample chunks after resampling.
+- **Signals carry `(label, text)`**: `text_confirmed` and `text_partial` now emit a source label string ("Tú" / "Reunión") as first argument. `TranscriptView` renders each source in its own color.
 
 ### Config
 
-`TranscriberConfig` (pydantic-settings) reads from env vars prefixed `TRANSCRIBER_`. Passed to `MainWindow` at startup and forwarded to `SlidingWindowWorker`. Key fields: `window_duration`, `transcribe_interval`, `confirm_threshold`, `vad_threshold`, `model_size`, `compute_type`.
+`TranscriberConfig` (pydantic-settings, `src/utils/config.py`) reads from env vars prefixed `TRANSCRIBER_`. Key fields: `window_duration`, `transcribe_interval`, `confirm_threshold`, `vad_threshold`, `model_size`, `compute_type`, `enable_system_audio`, `system_audio_device`, `mic_label`, `system_label`.
 
 ### Tests without hardware
 
-`tests/test_sliding_window.py` mocks `engine` and `vad` — safe to run anywhere. `test_audio.py`, `test_vad.py`, `test_engine.py` require a microphone/GPU and internet (first run downloads models).
+Safe to run anywhere (mock engine + VAD):
+- `tests/test_sliding_window.py` — core sliding window / buffer logic
+- `tests/test_dual_worker.py` — dual-source worker, signal labels, independent buffers
+
+Require hardware/models:
+- `test_audio.py`, `test_vad.py`, `test_engine.py`, `test_system_capture.py`
 
 ### Models downloaded on first use
 
