@@ -50,7 +50,7 @@ tmp/
 # Exports generados
 exports/
 *.srt
-*.txt
+exports/*.txt
 
 # Logs
 *.log
