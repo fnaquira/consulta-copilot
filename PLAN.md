@@ -35,21 +35,21 @@
 - [x] VAD se carga en background (VADLoader QThread) — botón Iniciar habilitado al terminar
 - [x] Verificar: al hablar LED se pone verde, al callar vuelve a gris; consola muestra cambios
 
-## Fase 4 — Transcripción Básica (por segmentos)
-- [ ] Implementar TranscriptionEngine en src/transcription/engine.py
-- [ ] Implementar TranscriptionWorker como QThread en src/transcription/worker.py
-- [ ] Worker: recibe segmentos del VAD, transcribe, emite Signal text_ready
-- [ ] Conectar text_ready → QTextEdit.append()
-- [ ] Verificar: al hablar y pausar, aparece texto transcrito en la UI
+## Fase 4 — Transcripción Básica ✓ (integrada en Fase 5)
+- [x] Implementar TranscriptionEngine en src/transcription/engine.py
+- [x] faster-whisper: silencio → "" OK; modelo tiny descargado y verificado
+- [x] ModelLoader (QThread) carga el modelo en background → statusbar muestra progreso
+- [x] Conectar text_confirmed → TranscriptView.append_confirmed (negro)
+- [x] Conectar text_partial → TranscriptView.update_partial (gris itálica)
 
-## Fase 5 — Sliding Window (Transcripción Continua)
-- [ ] Reemplazar lógica de "segmento completo" por rolling buffer
-- [ ] Implementar ventana deslizante de ~5 segundos
-- [ ] Transcribir cada ~1 segundo el buffer actual
-- [ ] Mostrar texto parcial (gris/itálica) que se va refinando
-- [ ] Confirmar texto cuando el segmento sale de la ventana (negro/normal)
-- [ ] Usar initial_prompt con texto confirmado previo para coherencia
-- [ ] Verificar: al hablar continuamente, el texto aparece y se refina en tiempo real
+## Fase 5 — Sliding Window (Transcripción Continua) ✓
+- [x] SlidingWindowWorker en src/transcription/worker.py
+- [x] Buffer rolling máx 5 segundos (configurable)
+- [x] Transcribir cada ~1 segundo si hay voz detectada
+- [x] Texto parcial se va refinando; confirmado es inmutable
+- [x] initial_prompt con últimos 200 chars para coherencia con Whisper
+- [x] Flush al detener: transcribe buffer restante como texto confirmado
+- [x] VAD en worker (emit solo cuando cambia estado para no saturar la UI)
 
 ## Fase 6 — Configuración y Polish
 - [ ] Implementar config.py con Pydantic BaseSettings

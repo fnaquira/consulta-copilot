@@ -1,132 +1,148 @@
 # -*- coding: utf-8 -*-
-from PySide6.QtCore import QThread, Signal
+"""
+SlidingWindowWorker — Fases 4 + 5
+
+Flujo:
+  queue → _drain_queue() → VAD por chunk → buffer rolling (5 seg máx)
+  Cada ~1 seg (si hay voz): transcribir buffer completo
+  Dividir resultado en confirmado / parcial
+  text_confirmed → append (negro)   text_partial → reemplaza (gris itálica)
+"""
 import queue
-import numpy as np
 import time
+from PySide6.QtCore import QThread, Signal
+import numpy as np
 
 
 class SlidingWindowWorker(QThread):
-    text_confirmed = Signal(str)     # Texto que ya no cambiará
-    text_partial = Signal(str)       # Texto provisional (se sobreescribe)
-    vad_activity = Signal(bool)      # Para indicador visual
+    text_confirmed = Signal(str)   # Texto inmutable → append
+    text_partial   = Signal(str)   # Texto provisional → sobreescribir
+    vad_activity   = Signal(bool)  # Para indicador LED
     status_changed = Signal(str)
     error_occurred = Signal(str)
 
-    WINDOW_DURATION = 5.0            # segundos de buffer
-    TRANSCRIBE_INTERVAL = 1.0        # cada cuánto transcribir
-    CONFIRM_THRESHOLD = 3.0          # audio más viejo que esto se confirma
     SAMPLE_RATE = 16000
 
-    def __init__(self, audio_queue, engine, vad, config=None):
+    def __init__(self, audio_queue: queue.Queue, engine, vad, config=None):
         super().__init__()
-        self.audio_queue = audio_queue
-        self.engine = engine
-        self.vad = vad
-        self._running = False
+        self.audio_queue  = audio_queue
+        self.engine       = engine
+        self.vad          = vad
+        self._running     = False
 
-        if config:
-            self.WINDOW_DURATION = config.window_duration
-            self.TRANSCRIBE_INTERVAL = config.transcribe_interval
-            self.CONFIRM_THRESHOLD = config.confirm_threshold
+        # Parámetros (sobreescribibles desde config)
+        self._window_dur   = getattr(config, "window_duration",    5.0) if config else 5.0
+        self._interval     = getattr(config, "transcribe_interval", 1.0) if config else 1.0
+        self._confirm_thr  = getattr(config, "confirm_threshold",   3.0) if config else 3.0
 
-        # Buffer circular
-        self._audio_buffer = np.array([], dtype=np.float32)
-        self._buffer_max_samples = int(self.WINDOW_DURATION * self.SAMPLE_RATE)
-        self._confirm_samples = int(self.CONFIRM_THRESHOLD * self.SAMPLE_RATE)
+        self._buf_max   = int(self._window_dur  * self.SAMPLE_RATE)
+        self._conf_samp = int(self._confirm_thr * self.SAMPLE_RATE)
 
-        # Contexto para Whisper
-        self._confirmed_text = ""
-        self._last_transcribe_time = 0
-        self._has_speech = False
+        self._audio_buffer      : np.ndarray = np.array([], dtype=np.float32)
+        self._confirmed_text    : str        = ""
+        self._last_transcribe   : float      = 0.0
+        self._has_speech        : bool       = False
+        self._last_vad_state    : bool | None = None
 
+    # ------------------------------------------------------------------ #
+    # Hilo principal
+    # ------------------------------------------------------------------ #
     def run(self):
         self._running = True
         self.status_changed.emit("Escuchando...")
 
         while self._running:
             try:
-                # 1. Drenar la queue de audio al buffer
-                chunks_added = self._drain_queue()
+                added = self._drain_queue()
 
-                # 2. Si hay suficiente audio y pasó el intervalo → transcribir
-                now = time.monotonic()
-                buffer_duration = len(self._audio_buffer) / self.SAMPLE_RATE
+                now            = time.monotonic()
+                buf_dur        = len(self._audio_buffer) / self.SAMPLE_RATE
+                time_elapsed   = now - self._last_transcribe
 
                 if (
-                    buffer_duration > 0.5
+                    buf_dur       >= 0.5
                     and self._has_speech
-                    and now - self._last_transcribe_time >= self.TRANSCRIBE_INTERVAL
+                    and time_elapsed >= self._interval
                 ):
                     self._do_transcription()
-                    self._last_transcribe_time = now
+                    self._last_transcribe = now
 
-                # 3. Trim buffer si excede ventana
-                if len(self._audio_buffer) > self._buffer_max_samples:
-                    overflow = len(self._audio_buffer) - self._buffer_max_samples
-                    self._audio_buffer = self._audio_buffer[overflow:]
+                # Trim buffer si excede ventana
+                if len(self._audio_buffer) > self._buf_max:
+                    excess = len(self._audio_buffer) - self._buf_max
+                    self._audio_buffer = self._audio_buffer[excess:]
 
-                # Pequeño sleep para no spinear CPU
-                if not chunks_added:
+                if not added:
                     time.sleep(0.01)
 
-            except Exception as e:
-                self.error_occurred.emit(str(e))
+            except Exception as exc:
+                self.error_occurred.emit(str(exc))
 
+    # ------------------------------------------------------------------ #
+    # Drenar queue → VAD por chunk → acumular buffer
+    # ------------------------------------------------------------------ #
     def _drain_queue(self) -> bool:
-        """Saca todos los chunks disponibles de la queue y los agrega al buffer."""
         added = False
         while True:
             try:
                 chunk = self.audio_queue.get_nowait()
-                # VAD check en cada chunk
-                is_speech = self.vad.is_speech(chunk)
-                self.vad_activity.emit(is_speech)
-                if is_speech:
-                    self._has_speech = True
-
-                self._audio_buffer = np.concatenate([self._audio_buffer, chunk])
-                added = True
             except queue.Empty:
                 break
+
+            is_speech = self.vad.is_speech(chunk)
+
+            # Emitir VAD solo cuando cambia el estado
+            if is_speech != self._last_vad_state:
+                self.vad_activity.emit(is_speech)
+                self._last_vad_state = is_speech
+
+            if is_speech:
+                self._has_speech = True
+
+            self._audio_buffer = np.concatenate([self._audio_buffer, chunk])
+            added = True
         return added
 
+    # ------------------------------------------------------------------ #
+    # Transcripción del buffer completo
+    # ------------------------------------------------------------------ #
     def _do_transcription(self):
-        """Transcribe el buffer completo y emite parcial/confirmado."""
         self.status_changed.emit("Transcribiendo...")
 
-        prompt = self._confirmed_text[-200:] if self._confirmed_text else ""
+        prompt    = self._confirmed_text[-200:] if self._confirmed_text else ""
         full_text = self.engine.transcribe(self._audio_buffer, initial_prompt=prompt)
 
         if not full_text.strip():
+            self._has_speech = False
             self.status_changed.emit("Escuchando...")
             return
 
-        buffer_duration = len(self._audio_buffer) / self.SAMPLE_RATE
+        buf_dur = len(self._audio_buffer) / self.SAMPLE_RATE
 
-        if buffer_duration > self.CONFIRM_THRESHOLD:
-            confirm_ratio = self.CONFIRM_THRESHOLD / buffer_duration
-            words = full_text.split()
-            confirm_idx = max(1, int(len(words) * confirm_ratio))
+        if buf_dur > self._confirm_thr:
+            ratio       = self._confirm_thr / buf_dur
+            words       = full_text.split()
+            confirm_idx = max(1, int(len(words) * ratio))
 
-            confirmed_part = " ".join(words[:confirm_idx])
-            partial_part = " ".join(words[confirm_idx:])
+            confirmed = " ".join(words[:confirm_idx])
+            partial   = " ".join(words[confirm_idx:])
 
-            if confirmed_part:
-                self._confirmed_text += " " + confirmed_part
-                self.text_confirmed.emit(confirmed_part)
-
-            self.text_partial.emit(partial_part)
+            if confirmed:
+                self._confirmed_text += " " + confirmed
+                self.text_confirmed.emit(confirmed)
+            self.text_partial.emit(partial)
         else:
-            # Buffer corto → todo es parcial
             self.text_partial.emit(full_text)
 
         self._has_speech = False
         self.status_changed.emit("Escuchando...")
 
+    # ------------------------------------------------------------------ #
+    # Parada + flush
+    # ------------------------------------------------------------------ #
     def stop(self):
         self._running = False
         self.wait()
-        # Flush: si queda audio en buffer, transcribir una última vez
         if len(self._audio_buffer) > self.SAMPLE_RATE * 0.3:
             try:
                 remaining = self.engine.transcribe(self._audio_buffer)
