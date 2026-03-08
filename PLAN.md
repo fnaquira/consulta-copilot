@@ -51,25 +51,27 @@
 - [x] Flush al detener: transcribe buffer restante como texto confirmado
 - [x] VAD en worker (emit solo cuando cambia estado para no saturar la UI)
 
-## Fase 6 — Configuración y Polish
-- [ ] Implementar config.py con Pydantic BaseSettings
-- [ ] Implementar settings_dialog.py (QDialog)
-- [ ] Carga del modelo en thread separado con progress en statusbar
-- [ ] Manejo de queue overflow (maxsize + descarte de chunks viejos)
-- [ ] closeEvent limpio (detener worker + capture antes de cerrar)
-- [ ] Shortcuts: Ctrl+S exportar, Ctrl+Q salir, Espacio iniciar/detener
-- [ ] Verificar: cambiar modelo en settings, reiniciar transcripción, todo fluido
+## Fase 6 — Configuración y Polish ✓
+- [x] config.py con Pydantic BaseSettings (env_prefix TRANSCRIBER_)
+- [x] settings_dialog.py (QDialog) con modelo, compute_type, VAD threshold, ventana deslizante
+- [x] ModelLoader QThread — carga modelo en background con progress en statusbar
+- [x] Queue overflow: maxsize=500 + descarte de chunk más antiguo en callback
+- [x] closeEvent limpio: detiene worker, captura y espera loaders
+- [x] Shortcuts: Ctrl+S exportar, Ctrl+Q salir, Espacio iniciar/detener
+- [x] Logging con logging.basicConfig en lugar de prints de debug
+- [x] Config aplicada a combos al iniciar (model_size, language, vad_threshold, compute_type)
 
-## Fase 7 — Exportación
-- [ ] Implementar export_to_txt con timestamps
-- [ ] Implementar export_to_srt con timestamps reales
-- [ ] Botón y menú de exportación con QFileDialog
-- [ ] Verificar: exportar transcripción, abrir archivo, contenido correcto con ñ/acentos
+## Fase 7 — Exportación ✓
+- [x] export_to_txt (UTF-8)
+- [x] export_to_srt con timestamps reales (desde TranscriptView._segments)
+- [x] TranscriptView lleva registro de segmentos (texto, t_inicio, t_fin)
+- [x] Menú Archivo: Exportar TXT (Ctrl+S) y Exportar SRT con QFileDialog
+- [x] Verificar: exporta con ñ/acentos correctamente (encoding UTF-8)
 
-## Fase 8 — Tests y Cleanup
-- [ ] test_audio.py: list_devices retorna al menos 1 dispositivo
-- [ ] test_engine.py: transcribir silencio retorna string vacío
-- [ ] test_vad.py: chunk de silencio → is_speech=False
-- [ ] test_sliding_window.py: verificar lógica de confirmación de texto
-- [ ] README.md con instrucciones de instalación y uso
-- [ ] Verificar: pytest pasa todo verde
+## Fase 8 — Tests y Cleanup ✓
+- [x] test_audio.py: list_devices retorna ≥1 dispositivo + estructura correcta (2 tests)
+- [x] test_engine.py: silencio → "" + initial_prompt no crashea (2 tests)
+- [x] test_vad.py: silencio → False + reset + ruido suave (3 tests)
+- [x] test_sliding_window.py: buffer corto/largo, texto vacío, reset _has_speech (4 tests)
+- [x] README.md con instalación, uso, estructura y configuración
+- [x] pytest: 11/11 tests verdes, 21 archivos sin errores de sintaxis

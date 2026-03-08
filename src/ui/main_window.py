@@ -28,6 +28,7 @@ class VADLoader(QThread):
         super().__init__()
         self._threshold = threshold
 
+
     def run(self):
         try:
             from src.audio.vad import VoiceActivityDetector
@@ -88,9 +89,18 @@ class MainWindow(QMainWindow):
         self._build_shortcuts()
         self._populate_devices()
 
+        # Aplicar config a los combos si está disponible
+        if config:
+            self.cb_modelo.setCurrentText(config.model_size)
+            for i in range(self.cb_idioma.count()):
+                if self.cb_idioma.itemData(i) == config.language:
+                    self.cb_idioma.setCurrentIndex(i)
+                    break
+
         # Cargar VAD al iniciar
+        vad_threshold = config.vad_threshold if config else 0.5
         self.statusBar().showMessage("Cargando VAD...")
-        self._load_vad()
+        self._load_vad(vad_threshold)
 
     # ------------------------------------------------------------------ #
     # UI
@@ -239,8 +249,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # Carga VAD en background
     # ------------------------------------------------------------------ #
-    def _load_vad(self):
-        self._vad_loader = VADLoader(threshold=0.5)
+    def _load_vad(self, threshold: float = 0.5):
+        self._vad_loader = VADLoader(threshold=threshold)
         self._vad_loader.loaded.connect(self._on_vad_loaded)
         self._vad_loader.failed.connect(self._on_vad_failed)
         self._vad_loader.start()
@@ -269,7 +279,7 @@ class MainWindow(QMainWindow):
 
         model_size   = self.cb_modelo.currentText()
         language     = self.cb_idioma.currentData() or "es"
-        compute_type = "int8"
+        compute_type = self._config.compute_type if self._config else "int8"
 
         # Deshabilitar controles mientras carga el modelo
         self.btn_iniciar.setEnabled(False)
@@ -397,14 +407,27 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_exportar_srt(self):
-        QMessageBox.information(self, "Exportar SRT",
-            "Exportación SRT con timestamps disponible en Fase 7.")
+        segments = self._transcript_view.get_segments()
+        if not segments:
+            QMessageBox.information(self, "Sin contenido", "No hay segmentos para exportar.")
+            return
+        ruta, _ = QFileDialog.getSaveFileName(
+            self, "Guardar subtítulos", "", "Subtítulos SRT (*.srt)"
+        )
+        if ruta:
+            try:
+                from src.utils.export import export_to_srt
+                from pathlib import Path
+                export_to_srt(segments, Path(ruta))
+                self.statusBar().showMessage(f"SRT exportado: {ruta}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error al exportar SRT", str(e))
 
     @Slot()
     def _on_abrir_settings(self):
         if self._config is None:
             QMessageBox.information(self, "Configuración",
-                "Configuración disponible en Fase 6.")
+                "No hay configuración disponible.")
             return
         from src.ui.settings_dialog import SettingsDialog
         dlg = SettingsDialog(self._config, self)

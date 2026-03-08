@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
-import sounddevice as sd
-import numpy as np
+import logging
 import queue
 from dataclasses import dataclass
+
+import numpy as np
+import sounddevice as sd
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -30,24 +34,14 @@ class AudioCapture:
             if d["max_input_channels"] > 0
         ]
 
-    _chunk_count = 0  # contador de clase para prints de debug (Fase 2)
-
     def start(self, device_index: int | None = None):
-        AudioCapture._chunk_count = 0
-
         def callback(indata, frames, time_info, status):
             if status:
-                print(f"[AudioCapture] {status}")
+                logger.warning("[AudioCapture] %s", status)
             chunk = indata.copy().flatten()
-            # Debug Fase 2: imprimir cada ~30 chunks (~1 seg)
-            AudioCapture._chunk_count += 1
-            if AudioCapture._chunk_count % 30 == 0:
-                rms = float((chunk ** 2).mean() ** 0.5)
-                print(f"[AudioCapture] chunk #{AudioCapture._chunk_count} | "
-                      f"samples={len(chunk)} | rms={rms:.5f}")
             if self.audio_queue.full():
                 try:
-                    self.audio_queue.get_nowait()  # descartar chunk más antiguo
+                    self.audio_queue.get_nowait()
                 except Exception:
                     pass
             self.audio_queue.put(chunk)
@@ -61,9 +55,11 @@ class AudioCapture:
             callback=callback,
         )
         self._stream.start()
+        logger.info("AudioCapture iniciado — dispositivo: %s", device_index)
 
     def stop(self):
         if self._stream:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+            logger.info("AudioCapture detenido")
