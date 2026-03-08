@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Virtual environment (uv)
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+uv.lock
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# PyInstaller / Nuitka builds
+*.exe
+*.app
+dist/
+build/
+
+# Torch / Whisper model cache
+*.pt
+*.pth
+*.bin
+models/
+model_cache/
+torch_cache/
+
+# Audio / temp files
+*.wav
+*.mp3
+*.ogg
+*.flac
+temp/
+tmp/
+
+# Exports generados
+exports/
+*.srt
+*.txt
+
+# Logs
+*.log
+logs/
+
+# IDE / editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# PySide6 compiled resources
+*_rc.py
+ui_*.py
