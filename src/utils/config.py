@@ -13,4 +13,10 @@ class TranscriberConfig(BaseSettings):
     confirm_threshold: float = 3.0
     queue_maxsize: int = 200
 
+    # Audio dual
+    enable_system_audio: bool = True
+    system_audio_device: int | None = None  # None = auto-detect
+    mic_label: str = "Tú"
+    system_label: str = "Reunión"
+
     model_config = {"env_prefix": "TRANSCRIBER_"}

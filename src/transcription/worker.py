@@ -1,48 +1,125 @@
 # -*- coding: utf-8 -*-
 """
-SlidingWindowWorker — Fases 4 + 5
+SlidingWindowWorker — Fase 9 (Audio Dual)
+
+Soporta una o dos fuentes de audio (micrófono + sistema).
+Cada fuente tiene su propio buffer, VAD y ciclo de transcripción.
+Las signals ahora emiten (source_label, text) para identificar el hablante.
+
+Backwards-compatible: si system_queue y system_vad son None, el worker
+se comporta exactamente igual que antes (solo micrófono).
 
 Flujo:
-  queue → _drain_queue() → VAD por chunk → buffer rolling (5 seg máx)
-  Cada ~1 seg (si hay voz): transcribir buffer completo
-  Dividir resultado en confirmado / parcial
-  text_confirmed → append (negro)   text_partial → reemplaza (gris itálica)
+  para cada stream en [mic, system]:
+    drain_queue → VAD por chunk → buffer rolling (5s máx)
+    cada ~1s (si hay voz): transcribir buffer → emit (label, text)
+
+NOTA: faster-whisper NO es thread-safe; ambos streams corren en el
+MISMO QThread procesados secuencialmente. Latencia máx ~1.5s en peor caso.
 """
+
 import queue
 import time
-from PySide6.QtCore import QThread, Signal
+from dataclasses import dataclass, field
+
 import numpy as np
+from PySide6.QtCore import QThread, Signal
 
 
+# ------------------------------------------------------------------ #
+# Estado de una fuente de audio individual
+# ------------------------------------------------------------------ #
+@dataclass
+class _AudioStream:
+    """Encapsula todo el estado de una fuente (mic o sistema)."""
+    name: str           # "mic" o "system"
+    label: str          # "Tú" o "Reunión"
+    audio_queue: queue.Queue
+    vad: object         # VoiceActivityDetector
+
+    # Parámetros configurables (se asignan en __post_init__)
+    window_duration: float = 5.0
+    transcribe_interval: float = 1.0
+    confirm_threshold: float = 3.0
+    sample_rate: int = 16000
+
+    # Estado mutable
+    audio_buffer: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=np.float32)
+    )
+    confirmed_text: str = ""
+    last_transcribe_time: float = 0.0
+    has_speech: bool = False
+    last_vad_state: bool | None = None
+
+    @property
+    def buffer_max_samples(self) -> int:
+        return int(self.window_duration * self.sample_rate)
+
+    @property
+    def confirm_samples(self) -> int:
+        return int(self.confirm_threshold * self.sample_rate)
+
+
+# ------------------------------------------------------------------ #
+# Worker principal
+# ------------------------------------------------------------------ #
 class SlidingWindowWorker(QThread):
-    text_confirmed = Signal(str)   # Texto inmutable → append
-    text_partial   = Signal(str)   # Texto provisional → sobreescribir
-    vad_activity   = Signal(bool)  # Para indicador LED
+    # Signals llevan (source_label, text)
+    text_confirmed = Signal(str, str)   # (label, texto confirmado)
+    text_partial   = Signal(str, str)   # (label, texto parcial)
+    vad_activity   = Signal(str, bool)  # (source_name, is_speech)
     status_changed = Signal(str)
     error_occurred = Signal(str)
 
     SAMPLE_RATE = 16000
 
-    def __init__(self, audio_queue: queue.Queue, engine, vad, config=None):
+    def __init__(
+        self,
+        mic_queue: queue.Queue,
+        engine,
+        mic_vad,
+        config=None,
+        system_queue: queue.Queue | None = None,
+        system_vad=None,
+    ):
         super().__init__()
-        self.audio_queue  = audio_queue
-        self.engine       = engine
-        self.vad          = vad
-        self._running     = False
+        self.engine   = engine
+        self._running = False
 
-        # Parámetros (sobreescribibles desde config)
-        self._window_dur   = getattr(config, "window_duration",    5.0) if config else 5.0
-        self._interval     = getattr(config, "transcribe_interval", 1.0) if config else 1.0
-        self._confirm_thr  = getattr(config, "confirm_threshold",   3.0) if config else 3.0
+        # Parámetros desde config
+        window_dur  = getattr(config, "window_duration",    5.0) if config else 5.0
+        interval    = getattr(config, "transcribe_interval", 1.0) if config else 1.0
+        confirm_thr = getattr(config, "confirm_threshold",   3.0) if config else 3.0
 
-        self._buf_max   = int(self._window_dur  * self.SAMPLE_RATE)
-        self._conf_samp = int(self._confirm_thr * self.SAMPLE_RATE)
+        mic_label    = getattr(config, "mic_label",    "Tú")      if config else "Tú"
+        system_label = getattr(config, "system_label", "Reunión") if config else "Reunión"
 
-        self._audio_buffer      : np.ndarray = np.array([], dtype=np.float32)
-        self._confirmed_text    : str        = ""
-        self._last_transcribe   : float      = 0.0
-        self._has_speech        : bool       = False
-        self._last_vad_state    : bool | None = None
+        # Fuente principal: micrófono
+        self._mic = _AudioStream(
+            name="mic",
+            label=mic_label,
+            audio_queue=mic_queue,
+            vad=mic_vad,
+            window_duration=window_dur,
+            transcribe_interval=interval,
+            confirm_threshold=confirm_thr,
+        )
+
+        # Fuente opcional: audio del sistema
+        self._system: _AudioStream | None = None
+        if system_queue is not None and system_vad is not None:
+            self._system = _AudioStream(
+                name="system",
+                label=system_label,
+                audio_queue=system_queue,
+                vad=system_vad,
+                window_duration=window_dur,
+                transcribe_interval=interval,
+                confirm_threshold=confirm_thr,
+            )
+
+        self._streams = [s for s in [self._mic, self._system] if s is not None]
 
     # ------------------------------------------------------------------ #
     # Hilo principal
@@ -53,74 +130,78 @@ class SlidingWindowWorker(QThread):
 
         while self._running:
             try:
-                added = self._drain_queue()
+                any_added = False
+                now = time.monotonic()
 
-                now            = time.monotonic()
-                buf_dur        = len(self._audio_buffer) / self.SAMPLE_RATE
-                time_elapsed   = now - self._last_transcribe
+                for stream in self._streams:
+                    added = self._drain_queue(stream)
+                    any_added = any_added or added
 
-                if (
-                    buf_dur       >= 0.5
-                    and self._has_speech
-                    and time_elapsed >= self._interval
-                ):
-                    self._do_transcription()
-                    self._last_transcribe = now
+                    buf_dur      = len(stream.audio_buffer) / stream.sample_rate
+                    time_elapsed = now - stream.last_transcribe_time
 
-                # Trim buffer si excede ventana
-                if len(self._audio_buffer) > self._buf_max:
-                    excess = len(self._audio_buffer) - self._buf_max
-                    self._audio_buffer = self._audio_buffer[excess:]
+                    if (
+                        buf_dur      >= 0.5
+                        and stream.has_speech
+                        and time_elapsed >= stream.transcribe_interval
+                    ):
+                        self._do_transcription(stream)
+                        stream.last_transcribe_time = now
 
-                if not added:
+                    # Trim buffer
+                    if len(stream.audio_buffer) > stream.buffer_max_samples:
+                        excess = len(stream.audio_buffer) - stream.buffer_max_samples
+                        stream.audio_buffer = stream.audio_buffer[excess:]
+
+                if not any_added:
                     time.sleep(0.01)
 
             except Exception as exc:
                 self.error_occurred.emit(str(exc))
 
     # ------------------------------------------------------------------ #
-    # Drenar queue → VAD por chunk → acumular buffer
+    # Drenar queue → VAD → acumular buffer
     # ------------------------------------------------------------------ #
-    def _drain_queue(self) -> bool:
+    def _drain_queue(self, stream: _AudioStream) -> bool:
         added = False
         while True:
             try:
-                chunk = self.audio_queue.get_nowait()
+                chunk = stream.audio_queue.get_nowait()
             except queue.Empty:
                 break
 
-            is_speech = self.vad.is_speech(chunk)
+            is_speech = stream.vad.is_speech(chunk)
 
             # Emitir VAD solo cuando cambia el estado
-            if is_speech != self._last_vad_state:
-                self.vad_activity.emit(is_speech)
-                self._last_vad_state = is_speech
+            if is_speech != stream.last_vad_state:
+                self.vad_activity.emit(stream.name, is_speech)
+                stream.last_vad_state = is_speech
 
             if is_speech:
-                self._has_speech = True
+                stream.has_speech = True
 
-            self._audio_buffer = np.concatenate([self._audio_buffer, chunk])
+            stream.audio_buffer = np.concatenate([stream.audio_buffer, chunk])
             added = True
         return added
 
     # ------------------------------------------------------------------ #
-    # Transcripción del buffer completo
+    # Transcripción del buffer de un stream
     # ------------------------------------------------------------------ #
-    def _do_transcription(self):
-        self.status_changed.emit("Transcribiendo...")
+    def _do_transcription(self, stream: _AudioStream):
+        self.status_changed.emit(f"Transcribiendo ({stream.label})...")
 
-        prompt    = self._confirmed_text[-200:] if self._confirmed_text else ""
-        full_text = self.engine.transcribe(self._audio_buffer, initial_prompt=prompt)
+        prompt    = stream.confirmed_text[-200:] if stream.confirmed_text else ""
+        full_text = self.engine.transcribe(stream.audio_buffer, initial_prompt=prompt)
 
         if not full_text.strip():
-            self._has_speech = False
+            stream.has_speech = False
             self.status_changed.emit("Escuchando...")
             return
 
-        buf_dur = len(self._audio_buffer) / self.SAMPLE_RATE
+        buf_dur = len(stream.audio_buffer) / stream.sample_rate
 
-        if buf_dur > self._confirm_thr:
-            ratio       = self._confirm_thr / buf_dur
+        if buf_dur > stream.confirm_threshold:
+            ratio       = stream.confirm_threshold / buf_dur
             words       = full_text.split()
             confirm_idx = max(1, int(len(words) * ratio))
 
@@ -128,13 +209,13 @@ class SlidingWindowWorker(QThread):
             partial   = " ".join(words[confirm_idx:])
 
             if confirmed:
-                self._confirmed_text += " " + confirmed
-                self.text_confirmed.emit(confirmed)
-            self.text_partial.emit(partial)
+                stream.confirmed_text += " " + confirmed
+                self.text_confirmed.emit(stream.label, confirmed)
+            self.text_partial.emit(stream.label, partial)
         else:
-            self.text_partial.emit(full_text)
+            self.text_partial.emit(stream.label, full_text)
 
-        self._has_speech = False
+        stream.has_speech = False
         self.status_changed.emit("Escuchando...")
 
     # ------------------------------------------------------------------ #
@@ -143,10 +224,22 @@ class SlidingWindowWorker(QThread):
     def stop(self):
         self._running = False
         self.wait()
-        if len(self._audio_buffer) > self.SAMPLE_RATE * 0.3:
+
+        # Flush del buffer del micrófono (comportamiento original)
+        mic = self._mic
+        if len(mic.audio_buffer) > self.SAMPLE_RATE * 0.3:
             try:
-                remaining = self.engine.transcribe(self._audio_buffer)
+                remaining = self.engine.transcribe(mic.audio_buffer)
                 if remaining.strip():
-                    self.text_confirmed.emit(remaining.strip())
+                    self.text_confirmed.emit(mic.label, remaining.strip())
+            except Exception:
+                pass
+
+        # Flush del buffer del sistema (si existe)
+        if self._system and len(self._system.audio_buffer) > self.SAMPLE_RATE * 0.3:
+            try:
+                remaining = self.engine.transcribe(self._system.audio_buffer)
+                if remaining.strip():
+                    self.text_confirmed.emit(self._system.label, remaining.strip())
             except Exception:
                 pass

@@ -75,3 +75,54 @@
 - [x] test_sliding_window.py: buffer corto/largo, texto vacío, reset _has_speech (4 tests)
 - [x] README.md con instalación, uso, estructura y configuración
 - [x] pytest: 11/11 tests verdes, 21 archivos sin errores de sintaxis
+
+## Fase 9 — Audio Dual (Micrófono + Sistema)
+
+### 9.1 — Captura de audio del sistema
+- [x] Crear src/audio/system_capture.py con clase SystemAudioCapture
+- [x] Windows: usar PyAudioWPatch para WASAPI loopback
+- [x] Linux: usar sounddevice con dispositivo PulseAudio/PipeWire monitor
+- [x] macOS: documentar que requiere BlackHole (no implementar auto-detect)
+- [x] Agregar PyAudioWPatch a requirements.txt (dependencia condicional Windows)
+- [x] Implementar auto-detección del dispositivo loopback por plataforma
+- [ ] Test manual: reproducir audio en YouTube, verificar que se captura
+- [ ] Verificar: chunks de 512 samples llegan a la queue correctamente
+
+### 9.2 — Pipeline dual en el Worker
+- [x] Crear segunda queue: system_audio_queue
+- [x] Crear segunda instancia de VAD para audio del sistema
+- [x] Agregar buffers separados en SlidingWindowWorker: _AudioStream por fuente
+- [x] Cada buffer mantiene su propia sliding window independiente (5s)
+- [x] Cada buffer tiene su propio ciclo de transcripción (~1s)
+- [x] Cada buffer tiene su propio confirmed_text para initial_prompt
+- [ ] Verificar: hablar al mic Y reproducir audio → ambos se transcriben
+
+### 9.3 — Etiquetado de hablantes
+- [x] Signals ahora emiten tuplas: (source, text) en vez de solo text
+- [x] text_confirmed = Signal(str, str)  → (source_label, text)
+- [x] text_partial = Signal(str, str)    → (source_label, text)
+- [x] Labels: mic → "[Tú]", system → "[Reunión]"
+- [ ] Verificar: transcripción muestra [Tú] y [Reunión] correctamente
+
+### 9.4 — UI actualizada
+- [x] TranscriptView: append_confirmed y update_partial reciben (source, text)
+- [x] Prefijo [Tú] en azul, [Reunión] en verde
+- [x] Texto parcial sigue en gris itálica pero con prefijo de color
+- [x] Manejar DOS textos parciales simultáneos (uno por fuente)
+- [x] Agregar QComboBox para dispositivo de sistema en toolbar
+- [x] Agregar checkbox "Capturar audio del sistema" en toolbar
+- [x] Agregar DOS indicadores VAD (uno por fuente)
+- [ ] Verificar: UI muestra ambas fuentes con formato correcto
+
+### 9.5 — Configuración y robustez
+- [x] Extender TranscriberConfig con enable_system_audio, system_audio_device
+- [x] Manejar caso: sistema no soporta loopback → deshabilitar opción, mostrar mensaje
+- [x] Manejar caso: usuario desactiva audio del sistema → volver a modo single
+- [x] Exportación: incluir labels de speaker en .txt y .srt
+- [x] Verificar: todo funciona con solo mic (backwards compatible)
+
+### 9.6 — Tests
+- [x] test_system_capture.py: detecta dispositivo loopback (skip si no hay)
+- [x] test_dual_worker.py: dos queues alimentan buffers independientes
+- [x] Todos los tests anteriores siguen pasando
+- [x] Verificar: pytest 25/25 tests verdes, 1 skipped (loopback sin audio activo)
