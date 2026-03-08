@@ -36,7 +36,11 @@ hidden_imports = [
     # sounddevice / PyAudioWPatch
     "sounddevice",
     "pyaudiowpatch",
-    # torch (silero-vad)
+    # silero-vad (paquete pip, v5+)
+    "silero_vad",
+    "silero_vad.model",
+    "silero_vad.utils_vad",
+    # torch (requerido por silero-vad)
     "torch",
     "torchaudio",
     # pydantic
@@ -63,8 +67,10 @@ a = Analysis(
     datas=[
         # Incluye el paquete src completo
         ("src", "src"),
-        # Certificados CA para HTTPS (huggingface_hub, torch.hub)
+        # Certificados CA para HTTPS (huggingface_hub)
         (".venv/Lib/site-packages/certifi/cacert.pem", "certifi"),
+        # Modelos de silero-vad empaquetados dentro del paquete pip
+        (".venv/Lib/site-packages/silero_vad/data", "silero_vad/data"),
     ],
     hiddenimports=hidden_imports,
     hookspath=[],
