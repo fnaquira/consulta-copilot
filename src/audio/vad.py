@@ -1,35 +1,17 @@
 # -*- coding: utf-8 -*-
-import io
-import sys
-import torch
 import numpy as np
+import torch
+from silero_vad import load_silero_vad
 
 
 class VoiceActivityDetector:
     def __init__(self, threshold: float = 0.5, sample_rate: int = 16000):
         try:
-            # torch.hub.load escribe en stdout/stderr internamente.
-            # En modo --windowed (sin consola) estos son None → AttributeError.
-            # Los reemplazamos temporalmente si es necesario.
-            _stdout_bak = sys.stdout
-            _stderr_bak = sys.stderr
-            if sys.stdout is None:
-                sys.stdout = io.StringIO()
-            if sys.stderr is None:
-                sys.stderr = io.StringIO()
-
-            self.model, _ = torch.hub.load(
-                "snakers4/silero-vad", "silero_vad",
-                force_reload=False, trust_repo=True
-            )
+            self.model = load_silero_vad()
         except Exception as e:
             raise RuntimeError(
-                f"No se pudo cargar Silero VAD. "
-                f"Asegúrate de tener conexión a internet la primera vez.\nError: {e}"
+                f"No se pudo cargar Silero VAD.\nError: {e}"
             )
-        finally:
-            sys.stdout = _stdout_bak
-            sys.stderr = _stderr_bak
         self.threshold = threshold
         self.sample_rate = sample_rate
         self._speech_active = False

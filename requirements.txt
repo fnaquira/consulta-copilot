@@ -8,3 +8,5 @@ pydantic-settings>=2.0
 pytest>=8.0
 PyAudioWPatch>=0.2.12.6; sys_platform == "win32"
 scipy>=1.12
+silero-vad>=5.0
+torchaudio>=2.2.0
