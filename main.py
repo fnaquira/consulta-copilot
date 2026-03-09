@@ -4,7 +4,8 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from src.ui.main_window import MainWindow
+from src.db.manager import DBManager
+from src.ui.home_window import HomeWindow
 from src.utils.config import TranscriberConfig
 
 logging.basicConfig(
@@ -17,9 +18,13 @@ logging.basicConfig(
 def main():
     config = TranscriberConfig()
     app = QApplication(sys.argv)
-    app.setApplicationName("Transcriptor en Tiempo Real")
+    app.setApplicationName("Copiloto Psicológico")
     app.setStyle("Fusion")
-    window = MainWindow(config=config)
+
+    db = DBManager(db_path=config.db_path or None)
+    db.init_db()
+
+    window = HomeWindow(db=db, config=config)
     window.show()
     sys.exit(app.exec())
 
