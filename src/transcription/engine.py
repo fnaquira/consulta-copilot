@@ -35,10 +35,10 @@ class TranscriptionEngine:
         segments, _ = self.model.transcribe(
             audio,
             language=self.language,
-            beam_size=5,
+            beam_size=8,
             vad_filter=False,         # VAD externo con Silero
             initial_prompt=initial_prompt or None,
-            no_speech_threshold=0.6,
+            no_speech_threshold=0.35,
             condition_on_previous_text=False,  # Nosotros manejamos el contexto
         )
         return " ".join(seg.text.strip() for seg in segments)

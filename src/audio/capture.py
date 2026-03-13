@@ -42,6 +42,7 @@ class AudioCapture:
             if self.audio_queue.full():
                 try:
                     self.audio_queue.get_nowait()
+                    logger.debug("[AudioCapture] Cola llena — chunk descartado")
                 except Exception:
                     pass
             self.audio_queue.put(chunk)

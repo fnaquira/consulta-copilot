@@ -254,7 +254,7 @@ class SessionWindow(QMainWindow):
             devs = cap.list_loopback_devices()
             self.cb_sistema.clear()
             if not devs:
-                self.cb_sistema.addItem("No disponible", None)
+                self.cb_sistema.addItem("Sin dispositivo virtual", None)
                 self.chk_sistema.setEnabled(False)
                 self.chk_sistema.setChecked(False)
             else:
@@ -359,9 +359,14 @@ class SessionWindow(QMainWindow):
             try:
                 self._sys_capture.start(system_device)
                 system_queue = self._system_queue
-            except Exception:
+            except Exception as e:
                 self._sys_capture = None
                 self._system_queue = None
+                QMessageBox.warning(
+                    self, "Audio del sistema",
+                    f"No se pudo capturar audio del sistema: {e}\n\n"
+                    "Solo se grabará el micrófono."
+                )
 
         # Worker de transcripción
         from src.transcription.worker import SlidingWindowWorker
