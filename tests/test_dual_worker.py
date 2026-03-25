@@ -2,7 +2,7 @@
 """
 test_dual_worker.py
 
-Tests para SlidingWindowWorker en modo dual (mic + sistema).
+Tests para SlidingWindowWorker en modo streaming (mic + sistema).
 Usa mocks para engine y vad — no requiere hardware ni modelos reales.
 """
 
@@ -30,15 +30,27 @@ class _MockVAD:
         pass
 
 
-class _MockEngine:
-    """Engine simulado que retorna texto fijo."""
-    def __init__(self, text: str = "hola mundo"):
-        self._text = text
+class _MockStreamEngine:
+    """Engine streaming simulado que graba chunks recibidos."""
+    def __init__(self):
+        self.chunks_received = []
+        self.started = False
+        self.stopped = False
+        self.on_partial = None
+        self.on_final = None
+        self.on_error = None
 
-    def transcribe(self, audio: np.ndarray, initial_prompt: str = "") -> str:
-        if len(audio) < 100:
-            return ""
-        return self._text
+    def start(self):
+        self.started = True
+
+    def send_audio(self, chunk: np.ndarray):
+        self.chunks_received.append(chunk.copy())
+
+    def stop(self):
+        self.stopped = True
+
+    def set_has_speech(self, val: bool):
+        pass
 
 
 def _make_chunk(samples: int = 512) -> np.ndarray:
@@ -66,21 +78,8 @@ def test_audio_stream_defaults():
     )
     assert s.name == "mic"
     assert s.label == "Tú"
-    assert len(s.audio_buffer) == 0
-    assert s.confirmed_text == ""
-    assert s.has_speech is False
-    assert s.buffer_max_samples == int(5.0 * 16000)
-
-
-def test_audio_stream_buffer_max():
-    """buffer_max_samples respeta window_duration."""
-    s = _AudioStream(
-        name="sys", label="Reunión",
-        audio_queue=queue.Queue(),
-        vad=_MockVAD(),
-        window_duration=3.0,
-    )
-    assert s.buffer_max_samples == 3 * 16000
+    assert s.engine is None
+    assert s.last_vad_state is None
 
 
 # ------------------------------------------------------------------ #
@@ -92,8 +91,8 @@ def test_worker_solo_mic_crea_un_stream():
     q = queue.Queue()
     w = SlidingWindowWorker(
         mic_queue=q,
-        engine=_MockEngine(),
         mic_vad=_MockVAD(),
+        mic_engine=_MockStreamEngine(),
     )
     assert len(w._streams) == 1
     assert w._system is None
@@ -105,10 +104,11 @@ def test_worker_dual_crea_dos_streams():
     sys_q = queue.Queue()
     w = SlidingWindowWorker(
         mic_queue=mic_q,
-        engine=_MockEngine(),
         mic_vad=_MockVAD(),
+        mic_engine=_MockStreamEngine(),
         system_queue=sys_q,
         system_vad=_MockVAD(),
+        system_engine=_MockStreamEngine(),
     )
     assert len(w._streams) == 2
     assert w._system is not None
@@ -119,8 +119,8 @@ def test_worker_system_none_no_agrega_stream():
     mic_q = queue.Queue()
     w = SlidingWindowWorker(
         mic_queue=mic_q,
-        engine=_MockEngine(),
         mic_vad=_MockVAD(),
+        mic_engine=_MockStreamEngine(),
         system_queue=None,
         system_vad=None,
     )
@@ -128,114 +128,140 @@ def test_worker_system_none_no_agrega_stream():
 
 
 # ------------------------------------------------------------------ #
-# Tests de señales emitidas
+# Tests de señales emitidas via engine callbacks
 # ------------------------------------------------------------------ #
 
-def test_solo_mic_emite_label_correcto():
-    """En modo solo-mic _do_transcription emite el label del mic."""
-    mic_q  = queue.Queue()
-    engine = _MockEngine("texto de prueba del mic largo para parcial")
+def test_engine_callbacks_emit_signals():
+    """Los callbacks del engine emiten signals de Qt correctamente."""
+    mic_q = queue.Queue()
+    engine = _MockStreamEngine()
     w = SlidingWindowWorker(
         mic_queue=mic_q,
-        engine=engine,
         mic_vad=_MockVAD(always_speech=True),
+        mic_engine=engine,
     )
 
     confirmed_signals = []
-    partial_signals   = []
+    partial_signals = []
     w.text_confirmed.connect(lambda src, txt: confirmed_signals.append((src, txt)))
     w.text_partial.connect(lambda src, txt: partial_signals.append((src, txt)))
-    w.status_changed.connect(lambda _: None)
 
-    # Llamar _do_transcription directamente (sin QThread) con buffer corto → parcial
-    w._mic.audio_buffer = np.zeros(16000, dtype=np.float32)  # 1s < 3s threshold
-    w._mic.has_speech   = True
-    w._do_transcription(w._mic)
+    # Simular que el engine invoca sus callbacks
+    assert engine.on_final is not None
+    assert engine.on_partial is not None
+    engine.on_final("texto confirmado")
+    engine.on_partial("texto parcial")
 
-    all_signals = confirmed_signals + partial_signals
-    assert len(all_signals) > 0, "No se emitieron señales"
-    for src, _ in all_signals:
-        assert src == "Tú", f"Label inesperado: {src!r}"
+    assert ("Tú", "texto confirmado") in confirmed_signals
+    assert ("Tú", "texto parcial") in partial_signals
 
 
 def test_dual_emite_labels_correctos():
-    """En modo dual, cada fuente emite su propio label."""
+    """En modo dual, cada engine callback usa su propio label."""
     mic_q = queue.Queue()
     sys_q = queue.Queue()
+    mic_engine = _MockStreamEngine()
+    sys_engine = _MockStreamEngine()
 
     w = SlidingWindowWorker(
         mic_queue=mic_q,
-        engine=_MockEngine("texto transcrito"),
         mic_vad=_MockVAD(always_speech=True),
+        mic_engine=mic_engine,
         system_queue=sys_q,
         system_vad=_MockVAD(always_speech=True),
+        system_engine=sys_engine,
     )
 
-    all_confirmed = []
-    w.text_confirmed.connect(lambda src, txt: all_confirmed.append(src))
+    confirmed = []
+    w.text_confirmed.connect(lambda src, txt: confirmed.append(src))
 
-    # Alimentar ambas queues con ~2 segundos de audio
-    for _ in range(64):
+    mic_engine.on_final("hola")
+    sys_engine.on_final("mundo")
+
+    assert "Tú" in confirmed
+    assert "Reunión" in confirmed
+
+
+# ------------------------------------------------------------------ #
+# Tests de forwarding de audio al engine
+# ------------------------------------------------------------------ #
+
+def test_drain_forwards_chunks_to_engine():
+    """_drain_queue envía chunks al engine."""
+    mic_q = queue.Queue()
+    engine = _MockStreamEngine()
+    w = SlidingWindowWorker(
+        mic_queue=mic_q,
+        mic_vad=_MockVAD(always_speech=False),
+        mic_engine=engine,
+    )
+
+    for _ in range(5):
         mic_q.put(_make_chunk())
-        sys_q.put(_make_chunk())
 
-    _run_worker_briefly(w, seconds=2.0)
+    w._drain_queue(w._mic)
+    assert len(engine.chunks_received) == 5
 
-    if all_confirmed:
-        labels = set(all_confirmed)
-        # Deben aparecer solo labels válidos
-        assert labels.issubset({"Tú", "Reunión"})
-
-
-# ------------------------------------------------------------------ #
-# Tests de buffers independientes
-# ------------------------------------------------------------------ #
 
 def test_buffers_independientes():
-    """Los buffers de mic y sistema NO comparten datos."""
+    """Los chunks de mic y sistema van a engines separados."""
     mic_q = queue.Queue()
     sys_q = queue.Queue()
-
-    mic_chunk = np.ones(512, dtype=np.float32) * 0.5
-    sys_chunk = np.ones(512, dtype=np.float32) * 0.9
+    mic_engine = _MockStreamEngine()
+    sys_engine = _MockStreamEngine()
 
     w = SlidingWindowWorker(
         mic_queue=mic_q,
-        engine=_MockEngine(),
         mic_vad=_MockVAD(always_speech=False),
+        mic_engine=mic_engine,
         system_queue=sys_q,
         system_vad=_MockVAD(always_speech=False),
+        system_engine=sys_engine,
     )
 
-    # Agregar solo al mic
+    # Solo agregar al mic
     for _ in range(10):
-        mic_q.put(mic_chunk.copy())
+        mic_q.put(_make_chunk())
 
-    # Drenar manualmente
     w._drain_queue(w._mic)
     if w._system:
         w._drain_queue(w._system)
 
-    # El buffer del mic debe tener datos, el del sistema no
-    assert len(w._mic.audio_buffer) > 0
-    if w._system:
-        assert len(w._system.audio_buffer) == 0
+    assert len(mic_engine.chunks_received) == 10
+    assert len(sys_engine.chunks_received) == 0
 
 
 # ------------------------------------------------------------------ #
-# Tests de stop + flush
+# Tests de stop + engine lifecycle
 # ------------------------------------------------------------------ #
 
 def test_stop_no_falla_sin_audio():
     """stop() no debe fallar con buffer vacío."""
+    engine = _MockStreamEngine()
     w = SlidingWindowWorker(
         mic_queue=queue.Queue(),
-        engine=_MockEngine(),
         mic_vad=_MockVAD(),
+        mic_engine=engine,
     )
     w.start()
     time.sleep(0.1)
-    w.stop()  # No debe lanzar excepción
+    w.stop()
+    assert engine.stopped
+
+
+def test_engines_start_on_run():
+    """Los engines se inician cuando el worker arranca."""
+    engine = _MockStreamEngine()
+    w = SlidingWindowWorker(
+        mic_queue=queue.Queue(),
+        mic_vad=_MockVAD(),
+        mic_engine=engine,
+    )
+    w.start()
+    time.sleep(0.2)
+    w._running = False
+    w.wait(2000)
+    assert engine.started
 
 
 def test_vad_activity_emite_source_name():
@@ -245,8 +271,8 @@ def test_vad_activity_emite_source_name():
 
     w = SlidingWindowWorker(
         mic_queue=mic_q,
-        engine=_MockEngine(),
         mic_vad=_MockVAD(always_speech=True),
+        mic_engine=_MockStreamEngine(),
     )
     w.vad_activity.connect(lambda src, val: vad_signals.append((src, val)))
 

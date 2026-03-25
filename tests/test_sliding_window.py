@@ -1,55 +1,44 @@
 # -*- coding: utf-8 -*-
 """
-Tests de la lógica de confirmación del SlidingWindowWorker.
-Se testea sin audio real ni modelo: se parchea engine y vad con mocks.
-
-Actualizado para Fase 9: _do_transcription(stream) y signals (str, str).
+Tests de la lógica de transcripción del LocalStreamEngine.
+Se testea sin audio real ni modelo: se parchea engine con mocks.
 """
-import queue
+import time
 import numpy as np
 from unittest.mock import MagicMock
 
-from src.transcription.worker import SlidingWindowWorker, _AudioStream
+from src.transcription.local_stream_engine import LocalStreamEngine
 
 
-def make_worker(window=5.0, interval=1.0, confirm=3.0):
-    engine = MagicMock()
-    vad    = MagicMock()
-    vad.is_speech.return_value = True
+def make_engine(window=5.0, interval=0.5, confirm=3.0):
+    """Crea un LocalStreamEngine con engine mock."""
+    whisper = MagicMock()
+    whisper.transcribe.return_value = ""
 
-    cfg = MagicMock()
-    cfg.window_duration     = window
-    cfg.transcribe_interval = interval
-    cfg.confirm_threshold   = confirm
-    cfg.mic_label    = "Tú"
-    cfg.system_label = "Reunión"
-
-    q = queue.Queue()
-    worker = SlidingWindowWorker(q, engine, vad, cfg)
-    return worker, engine, vad, q
-
-
-def _make_stream(worker, n_samples, has_speech=True):
-    """Crea un _AudioStream de prueba vinculado al worker."""
-    s = worker._mic
-    s.audio_buffer = np.zeros(n_samples, dtype=np.float32)
-    s.has_speech   = has_speech
-    return s
+    engine = LocalStreamEngine(
+        engine=whisper,
+        window_duration=window,
+        transcribe_interval=interval,
+        confirm_threshold=confirm,
+    )
+    return engine, whisper
 
 
 def test_buffer_corto_emite_solo_parcial():
     """Si el buffer dura menos que confirm_threshold, todo es parcial."""
-    worker, engine, _, q = make_worker(window=5.0, interval=1.0, confirm=3.0)
-    engine.transcribe.return_value = "hola mundo"
+    engine, whisper = make_engine(window=5.0, interval=0.5, confirm=3.0)
+    whisper.transcribe.return_value = "hola mundo"
 
     confirmed_texts = []
-    partial_texts   = []
-    worker.text_confirmed.connect(lambda src, t: confirmed_texts.append(t))
-    worker.text_partial.connect(lambda src, t: partial_texts.append(t))
-    worker.status_changed.connect(lambda _: None)
+    partial_texts = []
+    engine.on_final = lambda t: confirmed_texts.append(t)
+    engine.on_partial = lambda t: partial_texts.append(t)
 
-    stream = _make_stream(worker, n_samples=16000)  # 1 segundo < 3s threshold
-    worker._do_transcription(stream)
+    # Enviar 1s de audio (< 3s threshold)
+    audio = np.zeros(16000, dtype=np.float32)
+    engine.send_audio(audio)
+    engine._has_speech = True
+    engine._do_transcribe()
 
     assert confirmed_texts == [], "No debería haber texto confirmado con buffer corto"
     assert "hola mundo" in partial_texts
@@ -57,21 +46,23 @@ def test_buffer_corto_emite_solo_parcial():
 
 def test_buffer_largo_divide_confirmado_y_parcial():
     """Con buffer > confirm_threshold, parte se confirma y parte queda parcial."""
-    worker, engine, _, q = make_worker(window=5.0, interval=1.0, confirm=3.0)
+    engine, whisper = make_engine(window=5.0, interval=0.5, confirm=3.0)
     # 6 palabras; ratio = 3/5 = 0.6 → 3 palabras confirmadas, 3 parciales
-    engine.transcribe.return_value = "uno dos tres cuatro cinco seis"
+    whisper.transcribe.return_value = "uno dos tres cuatro cinco seis"
 
     confirmed_texts = []
-    partial_texts   = []
-    worker.text_confirmed.connect(lambda src, t: confirmed_texts.append(t))
-    worker.text_partial.connect(lambda src, t: partial_texts.append(t))
-    worker.status_changed.connect(lambda _: None)
+    partial_texts = []
+    engine.on_final = lambda t: confirmed_texts.append(t)
+    engine.on_partial = lambda t: partial_texts.append(t)
 
-    stream = _make_stream(worker, n_samples=5 * 16000)  # 5s > 3s threshold
-    worker._do_transcription(stream)
+    # Enviar 5s de audio (> 3s threshold)
+    audio = np.zeros(5 * 16000, dtype=np.float32)
+    engine.send_audio(audio)
+    engine._has_speech = True
+    engine._do_transcribe()
 
     assert len(confirmed_texts) > 0, "Debería haber texto confirmado con buffer largo"
-    assert len(partial_texts)   > 0, "Debería haber texto parcial"
+    assert len(partial_texts) > 0, "Debería haber texto parcial"
     palabras_total = (
         len(" ".join(confirmed_texts).split()) +
         len(" ".join(partial_texts).split())
@@ -81,32 +72,67 @@ def test_buffer_largo_divide_confirmado_y_parcial():
 
 def test_texto_vacio_no_emite():
     """Transcripción vacía no emite nada."""
-    worker, engine, _, _ = make_worker()
-    engine.transcribe.return_value = "   "
+    engine, whisper = make_engine()
+    whisper.transcribe.return_value = "   "
 
     confirmed_texts = []
-    partial_texts   = []
-    worker.text_confirmed.connect(lambda src, t: confirmed_texts.append(t))
-    worker.text_partial.connect(lambda src, t: partial_texts.append(t))
-    worker.status_changed.connect(lambda _: None)
+    partial_texts = []
+    engine.on_final = lambda t: confirmed_texts.append(t)
+    engine.on_partial = lambda t: partial_texts.append(t)
 
-    stream = _make_stream(worker, n_samples=16000)
-    worker._do_transcription(stream)
+    audio = np.zeros(16000, dtype=np.float32)
+    engine.send_audio(audio)
+    engine._has_speech = True
+    engine._do_transcribe()
 
     assert confirmed_texts == []
-    assert partial_texts   == []
+    assert partial_texts == []
 
 
 def test_has_speech_se_resetea_tras_transcripcion():
-    """has_speech del stream debe ser False después de _do_transcription."""
-    worker, engine, _, _ = make_worker()
-    engine.transcribe.return_value = "algo"
+    """has_speech debe ser False después de _do_transcribe."""
+    engine, whisper = make_engine()
+    whisper.transcribe.return_value = "algo"
 
-    worker.text_confirmed.connect(lambda src, t: None)
-    worker.text_partial.connect(lambda src, t: None)
-    worker.status_changed.connect(lambda _: None)
+    engine.on_final = lambda t: None
+    engine.on_partial = lambda t: None
 
-    stream = _make_stream(worker, n_samples=16000, has_speech=True)
-    worker._do_transcription(stream)
+    audio = np.zeros(16000, dtype=np.float32)
+    engine.send_audio(audio)
+    engine._has_speech = True
+    engine._do_transcribe()
 
-    assert stream.has_speech is False
+    assert engine._has_speech is False
+
+
+def test_circular_buffer_wraps():
+    """El buffer circular funciona correctamente al llenarse."""
+    engine, whisper = make_engine(window=1.0)  # 1 segundo = 16000 muestras
+    whisper.transcribe.return_value = "test"
+
+    # Enviar 2s de audio (debería sobreescribir primera mitad)
+    chunk1 = np.ones(16000, dtype=np.float32) * 0.5
+    chunk2 = np.ones(16000, dtype=np.float32) * 0.9
+    engine.send_audio(chunk1)
+    engine.send_audio(chunk2)
+
+    audio = engine._get_buffer_audio()
+    assert len(audio) == 16000
+    # El buffer debería contener solo chunk2 (el más reciente)
+    np.testing.assert_allclose(audio, chunk2, atol=1e-6)
+
+
+def test_flush_on_stop_confirms_all():
+    """Al detener, flush confirma todo el texto pendiente."""
+    engine, whisper = make_engine()
+    whisper.transcribe.return_value = "texto final"
+
+    confirmed = []
+    engine.on_final = lambda t: confirmed.append(t)
+
+    audio = np.zeros(16000, dtype=np.float32)
+    engine.send_audio(audio)
+    engine._has_speech = True
+    engine.stop()
+
+    assert "texto final" in confirmed

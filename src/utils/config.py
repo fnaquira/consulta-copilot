@@ -13,6 +13,12 @@ class TranscriberConfig(BaseSettings):
     confirm_threshold: float = 2.0
     queue_maxsize: int = 200
 
+    # --- Transcription provider ---
+    transcription_provider: str = "deepgram"  # "deepgram" | "local"
+    deepgram_api_key: str = ""
+    deepgram_model: str = "nova-2"
+    deepgram_endpointing: int = 300  # ms de silencio antes de confirmar
+
     # Audio dual
     enable_system_audio: bool = True
     system_audio_device: int | None = None  # None = auto-detect
