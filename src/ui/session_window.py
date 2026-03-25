@@ -39,6 +39,9 @@ class SessionWindow(QMainWindow):
         self._patient_id = patient_id
         self._config = config or TranscriberConfig()
 
+        # Aplicar settings de transcripción desde archivo JSON
+        self._apply_transcription_settings()
+
         # Estado de sesión
         patient = self._db.get_patient(patient_id)
         self._patient_name = patient["name"] if patient else f"Paciente #{patient_id}"
@@ -236,6 +239,17 @@ class SessionWindow(QMainWindow):
         self._notes_edit.setPlaceholderText("Escribe tus notas de la sesión aquí...")
         root.addWidget(self._notes_edit)
 
+    def _apply_transcription_settings(self):
+        """Aplica settings de transcripción desde el archivo JSON al config."""
+        from src.ui.config_dialog import load_ai_settings
+        settings = load_ai_settings()
+        if settings.get("transcription_provider"):
+            self._config.transcription_provider = settings["transcription_provider"]
+        if settings.get("deepgram_api_key"):
+            self._config.deepgram_api_key = settings["deepgram_api_key"]
+        if settings.get("deepgram_model"):
+            self._config.deepgram_model = settings["deepgram_model"]
+
     def _populate_devices(self):
         try:
             cap = AudioCapture(AudioConfig(), queue.Queue())
@@ -316,11 +330,38 @@ class SessionWindow(QMainWindow):
         self.cb_modelo.setEnabled(False)
         self.cb_idioma.setEnabled(False)
 
+        provider = self._config.transcription_provider
+
+        # Deepgram: no necesita cargar modelo local → inicio instantáneo
+        if provider == "deepgram":
+            api_key = self._get_deepgram_api_key()
+            if not api_key:
+                QMessageBox.warning(
+                    self, "API Key requerida",
+                    "Configura tu Deepgram API Key en Configuración → Transcripción.\n"
+                    "Cambiando a modo local..."
+                )
+                provider = "local"
+
+        if provider == "deepgram":
+            self._selected_language = language
+            self._start_capture_and_worker()
+            return
+
+        # Local: necesita cargar modelo Whisper primero
         self._model_loader = ModelLoader(model_size, compute_type, language)
         self._model_loader.progress.connect(self.statusBar().showMessage)
         self._model_loader.loaded.connect(self._on_model_loaded)
         self._model_loader.failed.connect(self._on_model_failed)
         self._model_loader.start()
+
+    def _get_deepgram_api_key(self) -> str:
+        """Obtiene la API key de Deepgram desde config o settings."""
+        if self._config.deepgram_api_key:
+            return self._config.deepgram_api_key
+        from src.ui.config_dialog import load_ai_settings
+        settings = load_ai_settings()
+        return settings.get("deepgram_api_key", "")
 
     @Slot(object)
     def _on_model_loaded(self, engine):
@@ -334,6 +375,57 @@ class SessionWindow(QMainWindow):
         self.btn_iniciar.setEnabled(True)
         self.cb_modelo.setEnabled(True)
         self.cb_idioma.setEnabled(True)
+
+    def _create_engines(self, system_audio: bool):
+        """Crea los engines de transcripción según el provider configurado."""
+        from src.transcription.streaming_engine import DeepgramStreamEngine
+        from src.transcription.local_stream_engine import LocalStreamEngine
+
+        provider = self._config.transcription_provider
+        language = getattr(self, '_selected_language', None) or self.cb_idioma.currentData() or "es"
+
+        if provider == "deepgram":
+            api_key = self._get_deepgram_api_key()
+            mic_engine = DeepgramStreamEngine(
+                api_key=api_key,
+                language=language,
+                model=self._config.deepgram_model,
+                endpointing=self._config.deepgram_endpointing,
+            )
+            sys_engine = None
+            if system_audio:
+                sys_engine = DeepgramStreamEngine(
+                    api_key=api_key,
+                    language=language,
+                    model=self._config.deepgram_model,
+                    endpointing=self._config.deepgram_endpointing,
+                )
+            return mic_engine, sys_engine
+
+        # Local: usar faster-whisper con adapter streaming
+        mic_engine = LocalStreamEngine(
+            engine=self._engine,
+            window_duration=self._config.window_duration,
+            transcribe_interval=self._config.transcribe_interval,
+            confirm_threshold=self._config.confirm_threshold,
+        )
+        sys_engine = None
+        if system_audio:
+            # Cada stream necesita su propia instancia local
+            # (faster-whisper no es thread-safe)
+            from src.transcription.engine import TranscriptionEngine
+            sys_whisper = TranscriptionEngine(
+                model_size=self.cb_modelo.currentText(),
+                compute_type=self._config.compute_type,
+                language=language,
+            )
+            sys_engine = LocalStreamEngine(
+                engine=sys_whisper,
+                window_duration=self._config.window_duration,
+                transcribe_interval=self._config.transcribe_interval,
+                confirm_threshold=self._config.confirm_threshold,
+            )
+        return mic_engine, sys_engine
 
     def _start_capture_and_worker(self):
         device_index = self.cb_dispositivo.currentData()
@@ -352,7 +444,8 @@ class SessionWindow(QMainWindow):
 
         # Audio del sistema (opcional)
         system_queue = None
-        if self.chk_sistema.isChecked() and self._system_vad is not None:
+        use_system = self.chk_sistema.isChecked() and self._system_vad is not None
+        if use_system:
             system_device = self.cb_sistema.currentData()
             self._system_queue = queue.Queue(maxsize=500)
             self._sys_capture = SystemAudioCapture(SystemAudioConfig(), self._system_queue)
@@ -362,21 +455,26 @@ class SessionWindow(QMainWindow):
             except Exception as e:
                 self._sys_capture = None
                 self._system_queue = None
+                use_system = False
                 QMessageBox.warning(
                     self, "Audio del sistema",
                     f"No se pudo capturar audio del sistema: {e}\n\n"
                     "Solo se grabará el micrófono."
                 )
 
+        # Crear engines de transcripción
+        mic_engine, sys_engine = self._create_engines(system_audio=use_system)
+
         # Worker de transcripción
         from src.transcription.worker import SlidingWindowWorker
         self._worker = SlidingWindowWorker(
             mic_queue=self._audio_queue,
-            engine=self._engine,
             mic_vad=self._mic_vad,
             config=self._config,
             system_queue=system_queue,
             system_vad=self._system_vad if system_queue else None,
+            mic_engine=mic_engine,
+            system_engine=sys_engine if system_queue else None,
         )
         self._worker.text_confirmed.connect(self._on_text_confirmed)
         self._worker.text_partial.connect(self._transcript_view.update_partial)

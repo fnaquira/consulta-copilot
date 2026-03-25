@@ -14,7 +14,9 @@ class TranscriptionEngine:
         device: str = "auto",
         compute_type: str = "int8",
         language: str = "es",
+        beam_size: int = 1,
     ):
+        self.beam_size = beam_size
         self.language = language
         # WhisperModel descarga el modelo y escribe en stdout/stderr.
         # En modo --windowed (sin consola) estos son None → AttributeError.
@@ -35,7 +37,7 @@ class TranscriptionEngine:
         segments, _ = self.model.transcribe(
             audio,
             language=self.language,
-            beam_size=8,
+            beam_size=self.beam_size,
             vad_filter=False,         # VAD externo con Silero
             initial_prompt=initial_prompt or None,
             no_speech_threshold=0.35,

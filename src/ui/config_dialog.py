@@ -30,6 +30,10 @@ def load_ai_settings() -> dict:
         "azure_deployment": "",
         "azure_api_version": "2024-02-01",
         "ollama_host": "http://localhost:11434",
+        # Transcripción
+        "transcription_provider": "deepgram",
+        "deepgram_api_key": "",
+        "deepgram_model": "nova-2",
     }
     if _SETTINGS_PATH.exists():
         try:
@@ -110,6 +114,7 @@ class ConfigDialog(QDialog):
         layout = QVBoxLayout(self)
 
         tabs = QTabWidget()
+        tabs.addTab(self._build_transcription_tab(), "Transcripción")
         tabs.addTab(self._build_ai_tab(), "Proveedor IA")
         tabs.addTab(self._build_audio_tab(), "Audio")
         layout.addWidget(tabs)
@@ -120,6 +125,49 @@ class ConfigDialog(QDialog):
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    # --- Pestaña Transcripción ---
+    def _build_transcription_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        form = QFormLayout()
+
+        self._trans_provider_combo = QComboBox()
+        self._trans_provider_combo.addItems(["Deepgram (streaming, recomendado)", "Local (offline)"])
+        self._trans_provider_combo.currentIndexChanged.connect(self._on_trans_provider_changed)
+        form.addRow("Motor:", self._trans_provider_combo)
+
+        # Deepgram fields
+        self._dg_widget = QWidget()
+        dg_form = QFormLayout(self._dg_widget)
+
+        self._dg_api_key = QLineEdit()
+        self._dg_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._dg_api_key.setPlaceholderText("Tu API key de Deepgram")
+        dg_form.addRow("Deepgram API Key:", self._dg_api_key)
+
+        self._dg_model = QComboBox()
+        self._dg_model.addItems(["nova-2", "nova-3", "enhanced", "base"])
+        dg_form.addRow("Modelo Deepgram:", self._dg_model)
+
+        layout.addLayout(form)
+        layout.addWidget(self._dg_widget)
+
+        # Info label
+        info = QLabel(
+            "Deepgram ofrece transcripción streaming en tiempo real con ~300ms de latencia.\n"
+            "Costo: ~$0.0043/minuto (~$0.26/hora).\n"
+            "Regístrate en console.deepgram.com para obtener tu API key."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #666; padding: 8px; font-size: 11px;")
+        layout.addWidget(info)
+
+        layout.addStretch()
+        return widget
+
+    def _on_trans_provider_changed(self, index: int):
+        self._dg_widget.setVisible(index == 0)
 
     # --- Pestaña IA ---
     def _build_ai_tab(self) -> QWidget:
@@ -271,6 +319,19 @@ class ConfigDialog(QDialog):
 
     def _load_settings(self):
         s = load_ai_settings()
+
+        # Transcripción
+        trans_map = {"deepgram": 0, "local": 1}
+        trans_idx = trans_map.get(s.get("transcription_provider", "deepgram"), 0)
+        self._trans_provider_combo.setCurrentIndex(trans_idx)
+        self._dg_api_key.setText(s.get("deepgram_api_key", ""))
+        dg_model = s.get("deepgram_model", "nova-2")
+        idx_model = self._dg_model.findText(dg_model)
+        if idx_model >= 0:
+            self._dg_model.setCurrentIndex(idx_model)
+        self._on_trans_provider_changed(trans_idx)
+
+        # IA
         provider_map = {"openai": 0, "azure": 1, "ollama": 2}
         idx = provider_map.get(s.get("ai_provider", "openai"), 0)
         self._provider_combo.setCurrentIndex(idx)
@@ -286,7 +347,14 @@ class ConfigDialog(QDialog):
     def _collect_settings(self) -> dict:
         provider_names = ["openai", "azure", "ollama"]
         provider = provider_names[self._provider_combo.currentIndex()]
+        trans_names = ["deepgram", "local"]
+        trans_provider = trans_names[self._trans_provider_combo.currentIndex()]
         return {
+            # Transcripción
+            "transcription_provider": trans_provider,
+            "deepgram_api_key": self._dg_api_key.text().strip(),
+            "deepgram_model": self._dg_model.currentText(),
+            # IA
             "ai_provider": provider,
             "ai_model": self._model_edit.text().strip() or "gpt-4o-mini",
             "openai_api_key": self._openai_key.text().strip(),
@@ -317,4 +385,9 @@ class ConfigDialog(QDialog):
     def _on_accept(self):
         settings = self._collect_settings()
         save_ai_settings(settings)
+        # Aplicar transcription settings al config si existe
+        if self._config:
+            self._config.transcription_provider = settings["transcription_provider"]
+            self._config.deepgram_api_key = settings["deepgram_api_key"]
+            self._config.deepgram_model = settings["deepgram_model"]
         self.accept()

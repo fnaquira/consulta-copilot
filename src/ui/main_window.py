@@ -458,15 +458,40 @@ class MainWindow(QMainWindow):
                     f"Audio del sistema no disponible: {e}. Solo micrófono activo."
                 )
 
+        # --- Crear engines streaming ---
+        from src.transcription.local_stream_engine import LocalStreamEngine
+        cfg = self._config
+        mic_engine = LocalStreamEngine(
+            engine=self._engine,
+            window_duration=getattr(cfg, "window_duration", 5.0) if cfg else 5.0,
+            transcribe_interval=getattr(cfg, "transcribe_interval", 1.0) if cfg else 1.0,
+            confirm_threshold=getattr(cfg, "confirm_threshold", 2.0) if cfg else 2.0,
+        )
+        sys_engine = None
+        if system_queue is not None:
+            from src.transcription.engine import TranscriptionEngine
+            sys_whisper = TranscriptionEngine(
+                model_size=self.cb_modelo.currentText(),
+                compute_type=getattr(cfg, "compute_type", "int8") if cfg else "int8",
+                language=self.cb_idioma.currentData() or "es",
+            )
+            sys_engine = LocalStreamEngine(
+                engine=sys_whisper,
+                window_duration=getattr(cfg, "window_duration", 5.0) if cfg else 5.0,
+                transcribe_interval=getattr(cfg, "transcribe_interval", 1.0) if cfg else 1.0,
+                confirm_threshold=getattr(cfg, "confirm_threshold", 2.0) if cfg else 2.0,
+            )
+
         # --- Worker ---
         from src.transcription.worker import SlidingWindowWorker
         self._worker = SlidingWindowWorker(
             mic_queue=self._audio_queue,
-            engine=self._engine,
             mic_vad=self._mic_vad,
             config=self._config,
             system_queue=system_queue,
             system_vad=self._system_vad if system_queue else None,
+            mic_engine=mic_engine,
+            system_engine=sys_engine,
         )
         self._worker.text_confirmed.connect(self._transcript_view.append_confirmed)
         self._worker.text_partial.connect(self._transcript_view.update_partial)
