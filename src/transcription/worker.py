@@ -1,29 +1,49 @@
 # -*- coding: utf-8 -*-
 """
-SlidingWindowWorker — Fase 9 (Audio Dual)
+SlidingWindowWorker — Algoritmo de confirmacion por solapamiento.
 
-Soporta una o dos fuentes de audio (micrófono + sistema).
-Cada fuente tiene su propio buffer, VAD y ciclo de transcripción.
-Las signals ahora emiten (source_label, text) para identificar el hablante.
+Soporta una o dos fuentes de audio (microfono + sistema).
+Cada fuente tiene su propio buffer acumulativo, VAD y ciclo de transcripcion.
+Las signals emiten (source_label, text) para identificar el hablante.
 
 Backwards-compatible: si system_queue y system_vad son None, el worker
-se comporta exactamente igual que antes (solo micrófono).
+se comporta exactamente igual que antes (solo microfono).
 
-Flujo:
-  para cada stream en [mic, system]:
-    drain_queue → VAD por chunk → buffer rolling (5s máx)
-    cada ~1s (si hay voz): transcribir buffer → emit (label, text)
+Algoritmo de overlap:
+  1. Audio se acumula en buffer sin recortar (hasta max_buffer_seconds)
+  2. Cada transcribe_interval segundos, se transcribe una ventana de los
+     ultimos window_duration segundos del buffer
+  3. Se compara con la transcripcion anterior usando SequenceMatcher
+  4. Palabras del inicio de prev que ya no aparecen en curr se confirman
+     (su audio "salio" de la ventana y fueron validadas por el solapamiento)
+  5. Buffer se recorta solo despues de confirmar texto
 
 NOTA: faster-whisper NO es thread-safe; ambos streams corren en el
-MISMO QThread procesados secuencialmente. Latencia máx ~1.5s en peor caso.
+MISMO QThread procesados secuencialmente.
 """
 
 import queue
 import time
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 
 import numpy as np
 from PySide6.QtCore import QThread, Signal
+
+
+# ------------------------------------------------------------------ #
+# Patrones de alucinacion conocidos de Whisper
+# ------------------------------------------------------------------ #
+HALLUCINATION_PATTERNS = [
+    "gracias por ver",
+    "thanks for watching",
+    "thank you",
+    "subtitulos",
+    "subtitulado por",
+    "suscribete",
+    "gracias por su atencion",
+    "muchas gracias",
+]
 
 
 # ------------------------------------------------------------------ #
@@ -33,18 +53,18 @@ from PySide6.QtCore import QThread, Signal
 class _AudioStream:
     """Encapsula todo el estado de una fuente (mic o sistema)."""
     name: str           # "mic" o "system"
-    label: str          # "Tú" o "Reunión"
+    label: str          # "Tu" o "Reunion"
     audio_queue: queue.Queue
     vad: object         # VoiceActivityDetector
 
-    # Parámetros configurables (se asignan en __post_init__)
-    window_duration: float = 5.0
-    transcribe_interval: float = 1.0
-    confirm_threshold: float = 3.0
+    # Parametros configurables
+    window_duration: float = 15.0       # ventana de transcripcion (segundos)
+    transcribe_interval: float = 3.0    # intervalo minimo entre transcripciones
+    max_buffer_seconds: float = 60.0    # tope de seguridad del buffer
     sample_rate: int = 16000
 
-    # Estado mutable
-    audio_buffer: np.ndarray = field(
+    # Estado mutable — buffer acumulativo
+    accumulating_buffer: np.ndarray = field(
         default_factory=lambda: np.array([], dtype=np.float32)
     )
     confirmed_text: str = ""
@@ -52,13 +72,16 @@ class _AudioStream:
     has_speech: bool = False
     last_vad_state: bool | None = None
 
+    # Historial de transcripciones para comparacion overlap
+    prev_transcription: list[str] | None = None
+
     @property
-    def buffer_max_samples(self) -> int:
+    def window_samples(self) -> int:
         return int(self.window_duration * self.sample_rate)
 
     @property
-    def confirm_samples(self) -> int:
-        return int(self.confirm_threshold * self.sample_rate)
+    def max_buffer_samples(self) -> int:
+        return int(self.max_buffer_seconds * self.sample_rate)
 
 
 # ------------------------------------------------------------------ #
@@ -87,15 +110,18 @@ class SlidingWindowWorker(QThread):
         self.engine   = engine
         self._running = False
 
-        # Parámetros desde config
-        window_dur  = getattr(config, "window_duration",    5.0) if config else 5.0
-        interval    = getattr(config, "transcribe_interval", 1.0) if config else 1.0
-        confirm_thr = getattr(config, "confirm_threshold",   3.0) if config else 3.0
+        # Parametros desde config
+        window_dur   = getattr(config, "window_duration",     15.0) if config else 15.0
+        interval     = getattr(config, "transcribe_interval",  3.0) if config else 3.0
+        max_buf_sec  = getattr(config, "max_buffer_seconds",  60.0) if config else 60.0
+        halluc_filt  = getattr(config, "hallucination_filter", True) if config else True
 
-        mic_label    = getattr(config, "mic_label",    "Tú")      if config else "Tú"
-        system_label = getattr(config, "system_label", "Reunión") if config else "Reunión"
+        mic_label    = getattr(config, "mic_label",    "Tu")      if config else "Tu"
+        system_label = getattr(config, "system_label", "Reunion") if config else "Reunion"
 
-        # Fuente principal: micrófono
+        self._hallucination_filter = halluc_filt
+
+        # Fuente principal: microfono
         self._mic = _AudioStream(
             name="mic",
             label=mic_label,
@@ -103,7 +129,7 @@ class SlidingWindowWorker(QThread):
             vad=mic_vad,
             window_duration=window_dur,
             transcribe_interval=interval,
-            confirm_threshold=confirm_thr,
+            max_buffer_seconds=max_buf_sec,
         )
 
         # Fuente opcional: audio del sistema
@@ -116,7 +142,7 @@ class SlidingWindowWorker(QThread):
                 vad=system_vad,
                 window_duration=window_dur,
                 transcribe_interval=interval,
-                confirm_threshold=confirm_thr,
+                max_buffer_seconds=max_buf_sec,
             )
 
         self._streams = [s for s in [self._mic, self._system] if s is not None]
@@ -137,21 +163,20 @@ class SlidingWindowWorker(QThread):
                     added = self._drain_queue(stream)
                     any_added = any_added or added
 
-                    buf_dur      = len(stream.audio_buffer) / stream.sample_rate
+                    buf_dur      = len(stream.accumulating_buffer) / stream.sample_rate
                     time_elapsed = now - stream.last_transcribe_time
 
                     if (
-                        buf_dur      >= 0.5
+                        buf_dur      >= 1.0
                         and stream.has_speech
                         and time_elapsed >= stream.transcribe_interval
                     ):
                         self._do_transcription(stream)
                         stream.last_transcribe_time = now
 
-                    # Trim buffer
-                    if len(stream.audio_buffer) > stream.buffer_max_samples:
-                        excess = len(stream.audio_buffer) - stream.buffer_max_samples
-                        stream.audio_buffer = stream.audio_buffer[excess:]
+                    # Safety cap: si el buffer crece demasiado, forzar confirmacion
+                    if len(stream.accumulating_buffer) > stream.max_buffer_samples:
+                        self._force_trim(stream)
 
                 if not any_added:
                     time.sleep(0.01)
@@ -160,7 +185,7 @@ class SlidingWindowWorker(QThread):
                 self.error_occurred.emit(str(exc))
 
     # ------------------------------------------------------------------ #
-    # Drenar queue → VAD → acumular buffer
+    # Drenar queue -> VAD -> acumular buffer
     # ------------------------------------------------------------------ #
     def _drain_queue(self, stream: _AudioStream) -> bool:
         added = False
@@ -180,43 +205,123 @@ class SlidingWindowWorker(QThread):
             if is_speech:
                 stream.has_speech = True
 
-            stream.audio_buffer = np.concatenate([stream.audio_buffer, chunk])
+            stream.accumulating_buffer = np.concatenate(
+                [stream.accumulating_buffer, chunk]
+            )
             added = True
         return added
 
     # ------------------------------------------------------------------ #
-    # Transcripción del buffer de un stream
+    # Transcripcion con overlap
     # ------------------------------------------------------------------ #
     def _do_transcription(self, stream: _AudioStream):
         self.status_changed.emit(f"Transcribiendo ({stream.label})...")
 
-        prompt    = stream.confirmed_text[-200:] if stream.confirmed_text else ""
-        full_text = self.engine.transcribe(stream.audio_buffer, initial_prompt=prompt)
+        # 1. Tomar ventana de los ultimos window_duration segundos
+        audio_window = stream.accumulating_buffer[-stream.window_samples:]
 
-        if not full_text.strip():
+        # 2. Transcribir
+        prompt = stream.confirmed_text[-200:] if stream.confirmed_text else ""
+        full_text = self.engine.transcribe(audio_window, initial_prompt=prompt)
+        curr_words = full_text.strip().split()
+
+        if not curr_words:
             stream.has_speech = False
             self.status_changed.emit("Escuchando...")
             return
 
-        buf_dur = len(stream.audio_buffer) / stream.sample_rate
+        # 3. Filtrar alucinaciones
+        if self._hallucination_filter and self._is_hallucination(curr_words):
+            stream.has_speech = False
+            self.status_changed.emit("Escuchando...")
+            return
 
-        if buf_dur > stream.confirm_threshold:
-            ratio       = stream.confirm_threshold / buf_dur
-            words       = full_text.split()
-            confirm_idx = max(1, int(len(words) * ratio))
-
-            confirmed = " ".join(words[:confirm_idx])
-            partial   = " ".join(words[confirm_idx:])
-
+        # 4. Comparar con transcripcion anterior
+        if stream.prev_transcription is not None:
+            confirmed, _ = self._compare_transcriptions(
+                stream.prev_transcription, curr_words
+            )
             if confirmed:
-                stream.confirmed_text += " " + confirmed
-                self.text_confirmed.emit(stream.label, confirmed)
-            self.text_partial.emit(stream.label, partial)
-        else:
-            self.text_partial.emit(stream.label, full_text)
+                confirmed_text = " ".join(confirmed)
+                stream.confirmed_text += " " + confirmed_text
+                self.text_confirmed.emit(stream.label, confirmed_text)
 
+                # Recortar buffer: quitar audio proporcional al texto confirmado
+                trim_samples = int(stream.transcribe_interval * stream.sample_rate)
+                stream.accumulating_buffer = stream.accumulating_buffer[trim_samples:]
+
+        # 5. Emitir parcial = texto de la transcripcion actual completa
+        self.text_partial.emit(stream.label, " ".join(curr_words))
+
+        # 6. Guardar para siguiente comparacion
+        stream.prev_transcription = curr_words
         stream.has_speech = False
         self.status_changed.emit("Escuchando...")
+
+    # ------------------------------------------------------------------ #
+    # Comparacion de transcripciones solapadas
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _compare_transcriptions(
+        prev_words: list[str], curr_words: list[str]
+    ) -> tuple[list[str], list[str]]:
+        """Compara dos transcripciones solapadas.
+
+        Returns:
+            (confirmed, stable):
+              confirmed = palabras del inicio de prev que ya no estan en curr
+                          (su audio salio de la ventana, se confirman)
+              stable = palabras que aparecen en ambas (zona de solapamiento)
+        """
+        if not prev_words:
+            return [], []
+
+        matcher = SequenceMatcher(None, prev_words, curr_words, autojunk=False)
+        blocks = matcher.get_matching_blocks()
+
+        # Buscar el primer bloque de match significativo
+        first_match = None
+        for block in blocks:
+            if block.size > 0:
+                first_match = block
+                break
+
+        if first_match is None:
+            # Sin solapamiento — confirmar todo lo anterior
+            return prev_words, []
+
+        # Palabras antes del primer match en prev = confirmadas
+        confirmed = prev_words[:first_match.a]
+        stable = prev_words[first_match.a: first_match.a + first_match.size]
+        return confirmed, stable
+
+    # ------------------------------------------------------------------ #
+    # Filtro de alucinaciones
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _is_hallucination(words: list[str]) -> bool:
+        """Detecta alucinaciones tipicas de Whisper (frases cortas repetitivas)."""
+        if len(words) > 5:
+            return False
+        text = " ".join(words).lower().strip()
+        return any(p in text for p in HALLUCINATION_PATTERNS)
+
+    # ------------------------------------------------------------------ #
+    # Safety cap: forzar trim cuando buffer crece demasiado
+    # ------------------------------------------------------------------ #
+    def _force_trim(self, stream: _AudioStream):
+        """Fuerza confirmacion y trim cuando el buffer excede max_buffer_seconds."""
+        if stream.prev_transcription:
+            # Confirmar todo lo que tengamos de la transcripcion previa
+            confirmed_text = " ".join(stream.prev_transcription)
+            stream.confirmed_text += " " + confirmed_text
+            self.text_confirmed.emit(stream.label, confirmed_text)
+            stream.prev_transcription = None
+
+        # Recortar a max_buffer_samples
+        excess = len(stream.accumulating_buffer) - stream.max_buffer_samples
+        if excess > 0:
+            stream.accumulating_buffer = stream.accumulating_buffer[excess:]
 
     # ------------------------------------------------------------------ #
     # Parada + flush
@@ -225,21 +330,12 @@ class SlidingWindowWorker(QThread):
         self._running = False
         self.wait()
 
-        # Flush del buffer del micrófono (comportamiento original)
-        mic = self._mic
-        if len(mic.audio_buffer) > self.SAMPLE_RATE * 0.3:
-            try:
-                remaining = self.engine.transcribe(mic.audio_buffer)
-                if remaining.strip():
-                    self.text_confirmed.emit(mic.label, remaining.strip())
-            except Exception:
-                pass
-
-        # Flush del buffer del sistema (si existe)
-        if self._system and len(self._system.audio_buffer) > self.SAMPLE_RATE * 0.3:
-            try:
-                remaining = self.engine.transcribe(self._system.audio_buffer)
-                if remaining.strip():
-                    self.text_confirmed.emit(self._system.label, remaining.strip())
-            except Exception:
-                pass
+        # Flush: transcribir buffer restante de cada stream y confirmar todo
+        for stream in self._streams:
+            if len(stream.accumulating_buffer) > self.SAMPLE_RATE * 0.3:
+                try:
+                    remaining = self.engine.transcribe(stream.accumulating_buffer)
+                    if remaining.strip():
+                        self.text_confirmed.emit(stream.label, remaining.strip())
+                except Exception:
+                    pass

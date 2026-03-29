@@ -62,24 +62,74 @@ class ModelLoader(QThread):
     failed   = Signal(str)
     progress = Signal(str)
 
-    def __init__(self, model_size: str, compute_type: str, language: str):
+    def __init__(
+        self,
+        model_size: str,
+        compute_type: str,
+        language: str,
+        stt_provider: str = "auto",
+        groq_api_key: str = "",
+        beam_size: int = 5,
+        no_speech_threshold: float = 0.35,
+        temperature: float = 0.0,
+    ):
         super().__init__()
         self._model_size   = model_size
         self._compute_type = compute_type
         self._language     = language
+        self._stt_provider = stt_provider
+        self._groq_api_key = groq_api_key
+        self._beam_size    = beam_size
+        self._no_speech_threshold = no_speech_threshold
+        self._temperature  = temperature
 
     def run(self):
         try:
-            self.progress.emit(f"Cargando modelo '{self._model_size}'...")
-            from src.transcription.engine import TranscriptionEngine
-            engine = TranscriptionEngine(
-                model_size=self._model_size,
-                compute_type=self._compute_type,
-                language=self._language,
-            )
+            engine = self._create_provider()
             self.loaded.emit(engine)
         except Exception as e:
             self.failed.emit(str(e))
+
+    def _create_provider(self):
+        from src.transcription.engine import (
+            LocalWhisperProvider, GroqWhisperProvider,
+        )
+        import torch
+
+        provider = self._stt_provider
+        has_gpu = torch.cuda.is_available()
+
+        if provider == "groq" or (provider == "auto" and not has_gpu and self._groq_api_key):
+            self.progress.emit("Conectando a Groq API (whisper-large-v3-turbo)...")
+            return GroqWhisperProvider(
+                api_key=self._groq_api_key,
+                language=self._language,
+            )
+
+        # Local: con GPU usar large-v3-turbo, sin GPU usar el modelo seleccionado
+        if provider == "auto" and has_gpu:
+            model = "large-v3-turbo"
+            device = "cuda"
+            self.progress.emit(f"GPU detectada. Cargando '{model}' local...")
+        else:
+            model = self._model_size
+            device = "auto"
+            if provider == "auto" and not self._groq_api_key:
+                self.progress.emit(
+                    f"Sin GPU ni Groq key. Cargando '{model}' local (CPU)..."
+                )
+            else:
+                self.progress.emit(f"Cargando modelo '{model}' local...")
+
+        return LocalWhisperProvider(
+            model_size=model,
+            device=device,
+            compute_type=self._compute_type,
+            language=self._language,
+            beam_size=self._beam_size,
+            no_speech_threshold=self._no_speech_threshold,
+            temperature=self._temperature,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +447,19 @@ class MainWindow(QMainWindow):
         self.cb_modelo.setEnabled(False)
         self.cb_idioma.setEnabled(False)
 
-        self._model_loader = ModelLoader(model_size, compute_type, language)
+        from src.ui.config_dialog import load_ai_settings
+        ai_settings = load_ai_settings()
+
+        self._model_loader = ModelLoader(
+            model_size=model_size,
+            compute_type=compute_type,
+            language=language,
+            stt_provider=ai_settings.get("stt_provider", "auto"),
+            groq_api_key=ai_settings.get("groq_api_key", ""),
+            beam_size=self._config.beam_size if self._config else 5,
+            no_speech_threshold=self._config.no_speech_threshold if self._config else 0.35,
+            temperature=self._config.temperature if self._config else 0.0,
+        )
         self._model_loader.progress.connect(self.statusBar().showMessage)
         self._model_loader.loaded.connect(self._on_model_loaded)
         self._model_loader.failed.connect(self._on_model_failed)

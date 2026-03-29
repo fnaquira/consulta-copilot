@@ -29,6 +29,21 @@ from src.ui.main_window import VADLoader, DualVADLoader, ModelLoader
 MODELOS = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
 IDIOMAS = [("Español", "es"), ("Inglés", "en"), ("Automático", None)]
 
+DOMAIN_LABELS = {
+    "clinical": {
+        "notes_label": "Notas del psicologo:",
+        "session_title": "Sesion #{n} — {name}",
+        "copilot_label": "Copiloto",
+        "notes_placeholder": "Escribe tus notas de la sesion aqui...",
+    },
+    "meeting": {
+        "notes_label": "Notas:",
+        "session_title": "Reunion — {name}",
+        "copilot_label": "Resumen de Reunion",
+        "notes_placeholder": "Notas de la reunion...",
+    },
+}
+
 
 class SessionWindow(QMainWindow):
     closed = Signal()  # emitida al cerrar la ventana
@@ -77,7 +92,13 @@ class SessionWindow(QMainWindow):
         self._transcript_pac = ""
         self._all_ai_suggestions = []
 
-        self.setWindowTitle(f"Sesión #{self._session_number} — {self._patient_name}")
+        # Labels por dominio
+        domain = self._config.app_domain
+        self._labels = DOMAIN_LABELS.get(domain, DOMAIN_LABELS["clinical"])
+        title = self._labels["session_title"].format(
+            n=self._session_number, name=self._patient_name
+        )
+        self.setWindowTitle(title)
         self.resize(1100, 720)
         self._build_ui()
         self._populate_devices()
@@ -100,7 +121,10 @@ class SessionWindow(QMainWindow):
         # --- Barra superior ---
         top = QHBoxLayout()
 
-        title = QLabel(f"Sesión #{self._session_number} — {self._patient_name}")
+        title_text = self._labels["session_title"].format(
+            n=self._session_number, name=self._patient_name
+        )
+        title = QLabel(title_text)
         font = QFont()
         font.setPointSize(12)
         font.setBold(True)
@@ -211,7 +235,7 @@ class SessionWindow(QMainWindow):
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
 
-        lbl_copilot = QLabel("Copiloto")
+        lbl_copilot = QLabel(self._labels["copilot_label"])
         lbl_copilot.setStyleSheet("font-weight:bold; font-size:13px; color:#9C27B0;")
         right_layout.addWidget(lbl_copilot)
 
@@ -227,13 +251,13 @@ class SessionWindow(QMainWindow):
         root.addWidget(splitter, 1)
 
         # --- Notas manuales ---
-        lbl_notes = QLabel("Notas del psicólogo:")
+        lbl_notes = QLabel(self._labels["notes_label"])
         lbl_notes.setStyleSheet("font-weight:bold;")
         root.addWidget(lbl_notes)
 
         self._notes_edit = QTextEdit()
         self._notes_edit.setFixedHeight(90)
-        self._notes_edit.setPlaceholderText("Escribe tus notas de la sesión aquí...")
+        self._notes_edit.setPlaceholderText(self._labels["notes_placeholder"])
         root.addWidget(self._notes_edit)
 
     def _populate_devices(self):
@@ -316,7 +340,22 @@ class SessionWindow(QMainWindow):
         self.cb_modelo.setEnabled(False)
         self.cb_idioma.setEnabled(False)
 
-        self._model_loader = ModelLoader(model_size, compute_type, language)
+        # Leer configuracion de STT desde settings persistidos
+        from src.ui.config_dialog import load_ai_settings
+        ai_settings = load_ai_settings()
+        stt_provider = ai_settings.get("stt_provider", self._config.stt_provider)
+        groq_api_key = ai_settings.get("groq_api_key", self._config.groq_api_key)
+
+        self._model_loader = ModelLoader(
+            model_size=model_size,
+            compute_type=compute_type,
+            language=language,
+            stt_provider=stt_provider,
+            groq_api_key=groq_api_key,
+            beam_size=self._config.beam_size,
+            no_speech_threshold=self._config.no_speech_threshold,
+            temperature=self._config.temperature,
+        )
         self._model_loader.progress.connect(self.statusBar().showMessage)
         self._model_loader.loaded.connect(self._on_model_loaded)
         self._model_loader.failed.connect(self._on_model_failed)
@@ -404,16 +443,31 @@ class SessionWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _start_copilot(self):
         from src.ai.copilot import CopilotWorker
+        from src.ai.prompts import DOMAIN_PROMPTS
         from src.ui.config_dialog import load_ai_settings
 
         settings = load_ai_settings()
         has_key = bool(settings.get("openai_api_key") or settings.get("azure_api_key")
                        or settings.get("ai_provider") == "ollama")
         if not has_key:
-            self._copilot_view.setPlainText("Configure un proveedor de IA en Configuración para activar el copiloto.")
+            self._copilot_view.setPlainText("Configure un proveedor de IA en Configuracion para activar el copiloto.")
             return
 
-        # Historial de sesiones previas (últimos resúmenes)
+        # Seleccionar prompt segun dominio
+        domain = self._config.app_domain
+        system_prompt = DOMAIN_PROMPTS.get(domain, DOMAIN_PROMPTS["clinical"])
+
+        # Construir contexto segun dominio
+        context_parts = []
+        if self._patient_name:
+            context_parts.append(f"Nombre: {self._patient_name}")
+        if self._diagnosis:
+            context_parts.append(f"Diagnostico: {self._diagnosis}")
+        if self._general_notes:
+            context_parts.append(f"Notas: {self._general_notes}")
+        context_text = "\n".join(context_parts)
+
+        # Historial de sesiones previas
         sessions = self._db.get_sessions_by_patient(self._patient_id)
         history = []
         for s in sessions[-3:]:
@@ -423,13 +477,13 @@ class SessionWindow(QMainWindow):
                 history.append(f"S#{s['session_number']}: {notes[:200]} | IA: {ai[:200]}")
 
         self._copilot_worker = CopilotWorker(
-            patient_name=self._patient_name,
-            diagnosis=self._diagnosis,
-            general_notes=self._general_notes,
-            session_history=history,
+            system_prompt=system_prompt,
+            context_text=context_text,
+            previous_summaries=history,
         )
         self._copilot_worker.chunk_received.connect(self._on_copilot_chunk)
         self._copilot_worker.analysis_done.connect(self._on_copilot_done)
+        self._copilot_worker.summary_updated.connect(self._on_summary_updated)
         self._copilot_worker.error_occurred.connect(self._on_copilot_error)
         self._copilot_worker.start()
 
@@ -448,11 +502,16 @@ class SessionWindow(QMainWindow):
         self._copilot_view.append("\n" + "─" * 40 + "\n")
 
     @Slot(str)
+    def _on_summary_updated(self, summary: str):
+        """El copiloto emitio un resumen actualizado."""
+        pass  # Por ahora el resumen ya se muestra via chunk_received
+
+    @Slot(str)
     def _on_copilot_error(self, error: str):
-        self._copilot_view.append(f"\n⚠ Error: {error}\n")
+        self._copilot_view.append(f"\nError: {error}\n")
 
     # ------------------------------------------------------------------
-    # Señales de transcripción
+    # Signals de transcripcion
     # ------------------------------------------------------------------
     @Slot(str, str)
     def _on_text_confirmed(self, label: str, text: str):
@@ -467,9 +526,9 @@ class SessionWindow(QMainWindow):
         elif label == pac_label:
             self._transcript_pac += " " + text
 
-        # Alimentar copiloto con todo el texto (ambas fuentes)
+        # Alimentar copiloto con texto de AMBAS fuentes
         if self._copilot_worker is not None:
-            self._copilot_worker.append_patient_text(text)
+            self._copilot_worker.append_text(label, text)
 
     @Slot(str, bool)
     def _update_vad_indicator(self, source: str, is_speech: bool):

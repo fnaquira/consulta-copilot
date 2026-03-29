@@ -56,25 +56,25 @@ class SettingsDialog(QDialog):
         form_window = QFormLayout(grp_window)
 
         self.sb_window = QDoubleSpinBox()
-        self.sb_window.setRange(2.0, 10.0)
-        self.sb_window.setSingleStep(0.5)
+        self.sb_window.setRange(5.0, 30.0)
+        self.sb_window.setSingleStep(1.0)
         self.sb_window.setSuffix(" seg")
         self.sb_window.setValue(self._config.window_duration)
-        form_window.addRow("Duración buffer:", self.sb_window)
+        form_window.addRow("Ventana de audio:", self.sb_window)
 
         self.sb_interval = QDoubleSpinBox()
-        self.sb_interval.setRange(0.3, 3.0)
-        self.sb_interval.setSingleStep(0.1)
+        self.sb_interval.setRange(1.0, 10.0)
+        self.sb_interval.setSingleStep(0.5)
         self.sb_interval.setSuffix(" seg")
         self.sb_interval.setValue(self._config.transcribe_interval)
         form_window.addRow("Intervalo transcripción:", self.sb_interval)
 
-        self.sb_confirm = QDoubleSpinBox()
-        self.sb_confirm.setRange(1.0, 8.0)
-        self.sb_confirm.setSingleStep(0.5)
-        self.sb_confirm.setSuffix(" seg")
-        self.sb_confirm.setValue(self._config.confirm_threshold)
-        form_window.addRow("Umbral confirmación:", self.sb_confirm)
+        self.sb_max_buffer = QDoubleSpinBox()
+        self.sb_max_buffer.setRange(30.0, 120.0)
+        self.sb_max_buffer.setSingleStep(10.0)
+        self.sb_max_buffer.setSuffix(" seg")
+        self.sb_max_buffer.setValue(self._config.max_buffer_seconds)
+        form_window.addRow("Buffer máximo:", self.sb_max_buffer)
 
         layout.addWidget(grp_window)
 
@@ -93,5 +93,5 @@ class SettingsDialog(QDialog):
             "vad_threshold": self.sb_threshold.value(),
             "window_duration": self.sb_window.value(),
             "transcribe_interval": self.sb_interval.value(),
-            "confirm_threshold": self.sb_confirm.value(),
+            "max_buffer_seconds": self.sb_max_buffer.value(),
         }
