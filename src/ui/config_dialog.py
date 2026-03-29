@@ -30,6 +30,9 @@ def load_ai_settings() -> dict:
         "azure_deployment": "",
         "azure_api_version": "2024-02-01",
         "ollama_host": "http://localhost:11434",
+        "stt_provider": "auto",
+        "groq_api_key": "",
+        "app_domain": "clinical",
     }
     if _SETTINGS_PATH.exists():
         try:
@@ -110,6 +113,7 @@ class ConfigDialog(QDialog):
         layout = QVBoxLayout(self)
 
         tabs = QTabWidget()
+        tabs.addTab(self._build_general_tab(), "General")
         tabs.addTab(self._build_ai_tab(), "Proveedor IA")
         tabs.addTab(self._build_audio_tab(), "Audio")
         layout.addWidget(tabs)
@@ -121,10 +125,71 @@ class ConfigDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    # --- Pestaña General ---
+    def _build_general_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        form = QFormLayout()
+
+        self._domain_combo = QComboBox()
+        self._domain_combo.addItems(["Clinico (Psicologia)", "Reuniones (Manager)"])
+        form.addRow("Modo de uso:", self._domain_combo)
+
+        layout.addLayout(form)
+
+        info = QLabel(
+            "Clinico: copiloto asiste al psicologo con observaciones discretas.\n"
+            "Reuniones: copiloto genera resumen, temas clave y decisiones."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #666; padding: 8px 0;")
+        layout.addWidget(info)
+
+        layout.addStretch()
+        return widget
+
     # --- Pestaña IA ---
     def _build_ai_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
+
+        # === Seccion: Transcripcion (STT) ===
+        stt_label = QLabel("Transcripcion (STT)")
+        stt_label.setFont(QFont("", weight=QFont.Weight.Bold))
+        layout.addWidget(stt_label)
+
+        stt_form = QFormLayout()
+        self._stt_provider_combo = QComboBox()
+        self._stt_provider_combo.addItems([
+            "Auto (GPU=local, CPU=Groq)",
+            "Local (faster-whisper)",
+            "Cloud (Groq API)",
+        ])
+        self._stt_provider_combo.currentIndexChanged.connect(self._on_stt_provider_changed)
+        stt_form.addRow("Motor STT:", self._stt_provider_combo)
+
+        self._groq_key_edit = QLineEdit()
+        self._groq_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._groq_key_edit.setPlaceholderText("gsk_...")
+        stt_form.addRow("Groq API Key:", self._groq_key_edit)
+
+        layout.addLayout(stt_form)
+
+        self._lbl_stt_info = QLabel("")
+        self._lbl_stt_info.setWordWrap(True)
+        self._lbl_stt_info.setStyleSheet("color: #666; padding: 4px 0;")
+        layout.addWidget(self._lbl_stt_info)
+
+        # Separador visual
+        sep = QLabel("")
+        sep.setFixedHeight(8)
+        layout.addWidget(sep)
+
+        # === Seccion: Copiloto IA (LLM) ===
+        llm_label = QLabel("Copiloto IA (LLM)")
+        llm_label.setFont(QFont("", weight=QFont.Weight.Bold))
+        layout.addWidget(llm_label)
+
         form = QFormLayout()
 
         self._provider_combo = QComboBox()
@@ -138,7 +203,7 @@ class ConfigDialog(QDialog):
 
         layout.addLayout(form)
 
-        # --- Campos dinámicos por proveedor ---
+        # --- Campos dinamicos por proveedor ---
         self._openai_widget = self._build_openai_fields()
         self._azure_widget = self._build_azure_fields()
         self._ollama_widget = self._build_ollama_fields()
@@ -147,9 +212,9 @@ class ConfigDialog(QDialog):
         layout.addWidget(self._azure_widget)
         layout.addWidget(self._ollama_widget)
 
-        # --- Botón probar ---
+        # --- Boton probar ---
         test_row = QHBoxLayout()
-        self._btn_test = QPushButton("Probar conexión")
+        self._btn_test = QPushButton("Probar conexion")
         self._btn_test.clicked.connect(self._on_test_connection)
         self._lbl_test = QLabel("")
         self._lbl_test.setWordWrap(True)
@@ -269,8 +334,42 @@ class ConfigDialog(QDialog):
         self._azure_widget.setVisible(index == 1)
         self._ollama_widget.setVisible(index == 2)
 
+    def _on_stt_provider_changed(self, index: int):
+        stt_names = ["auto", "local", "groq"]
+        is_groq = stt_names[index] == "groq"
+        is_auto = stt_names[index] == "auto"
+        self._groq_key_edit.setEnabled(is_groq or is_auto)
+        if is_groq:
+            self._lbl_stt_info.setText(
+                "Groq usa whisper-large-v3-turbo en la nube. "
+                "Free tier: ~116 min/dia. Obten tu key en console.groq.com"
+            )
+        elif is_auto:
+            self._lbl_stt_info.setText(
+                "Auto: si hay GPU usa faster-whisper local (large-v3-turbo). "
+                "Sin GPU y con Groq key usa Groq cloud. Sin ambos usa modelo local en CPU."
+            )
+        else:
+            self._lbl_stt_info.setText(
+                "Usa faster-whisper local. Con GPU se recomienda large-v3-turbo."
+            )
+
     def _load_settings(self):
         s = load_ai_settings()
+
+        # Domain
+        domain_map = {"clinical": 0, "meeting": 1}
+        domain_idx = domain_map.get(s.get("app_domain", "clinical"), 0)
+        self._domain_combo.setCurrentIndex(domain_idx)
+
+        # STT provider
+        stt_map = {"auto": 0, "local": 1, "groq": 2}
+        stt_idx = stt_map.get(s.get("stt_provider", "auto"), 0)
+        self._stt_provider_combo.setCurrentIndex(stt_idx)
+        self._groq_key_edit.setText(s.get("groq_api_key", ""))
+        self._on_stt_provider_changed(stt_idx)
+
+        # LLM provider
         provider_map = {"openai": 0, "azure": 1, "ollama": 2}
         idx = provider_map.get(s.get("ai_provider", "openai"), 0)
         self._provider_combo.setCurrentIndex(idx)
@@ -286,6 +385,10 @@ class ConfigDialog(QDialog):
     def _collect_settings(self) -> dict:
         provider_names = ["openai", "azure", "ollama"]
         provider = provider_names[self._provider_combo.currentIndex()]
+        stt_names = ["auto", "local", "groq"]
+        stt_provider = stt_names[self._stt_provider_combo.currentIndex()]
+        domain_names = ["clinical", "meeting"]
+        app_domain = domain_names[self._domain_combo.currentIndex()]
         return {
             "ai_provider": provider,
             "ai_model": self._model_edit.text().strip() or "gpt-4o-mini",
@@ -295,6 +398,9 @@ class ConfigDialog(QDialog):
             "azure_deployment": self._azure_deployment.text().strip(),
             "azure_api_version": self._azure_api_version.text().strip() or "2024-02-01",
             "ollama_host": self._ollama_host.text().strip() or "http://localhost:11434",
+            "stt_provider": stt_provider,
+            "groq_api_key": self._groq_key_edit.text().strip(),
+            "app_domain": app_domain,
         }
 
     def _on_test_connection(self):

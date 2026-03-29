@@ -8,18 +8,30 @@ class TranscriberConfig(BaseSettings):
     sample_rate: int = 16000
     vad_threshold: float = 0.3
     compute_type: str = "int8"
-    window_duration: float = 5.0
-    transcribe_interval: float = 1.0
-    confirm_threshold: float = 2.0
     queue_maxsize: int = 200
+
+    # --- Engine params ---
+    beam_size: int = 5
+    no_speech_threshold: float = 0.35
+    temperature: float = 0.0
+
+    # --- STT provider ---
+    stt_provider: str = "auto"           # "auto" | "local" | "groq"
+    groq_api_key: str = ""
+
+    # --- Overlap algorithm ---
+    window_duration: float = 15.0        # ventana de transcripcion (segundos)
+    transcribe_interval: float = 3.0     # intervalo entre transcripciones
+    max_buffer_seconds: float = 60.0     # tope de seguridad del buffer
+    hallucination_filter: bool = True
 
     # Audio dual
     enable_system_audio: bool = True
     system_audio_device: int | None = None  # None = auto-detect
-    mic_label: str = "Tú"
-    system_label: str = "Reunión"
+    mic_label: str = "Tu"
+    system_label: str = "Reunion"
 
-    # --- AI Provider ---
+    # --- AI Provider (copiloto LLM) ---
     ai_provider: str = "openai"          # "openai" | "azure" | "ollama"
     ai_model: str = "gpt-4o-mini"
     openai_api_key: str = ""
@@ -30,16 +42,19 @@ class TranscriberConfig(BaseSettings):
     ollama_host: str = "http://localhost:11434"
 
     # --- Audio loopback ---
-    loopback_device: str = ""            # dispositivo para capturar audio del paciente
+    loopback_device: str = ""
 
     # --- DB ---
-    db_path: str = ""                    # vacío = default (~/.consulta_copilot/copilot.db)
+    db_path: str = ""                    # vacio = default (~/.consulta_copilot/copilot.db)
+
+    # --- Dominio ---
+    app_domain: str = "clinical"         # "clinical" | "meeting"
 
     model_config = {"env_prefix": "TRANSCRIBER_"}
 
     def get_ai_client(self):
-        """Retorna un cliente openai-compatible según el provider configurado."""
-        import openai  # importación tardía para no requerir openai si no se usa
+        """Retorna un cliente openai-compatible segun el provider configurado."""
+        import openai
         if self.ai_provider == "openai":
             return openai.OpenAI(api_key=self.openai_api_key)
         elif self.ai_provider == "azure":

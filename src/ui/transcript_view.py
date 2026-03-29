@@ -20,8 +20,10 @@ from PySide6.QtCore import Slot
 
 
 _SOURCE_COLORS = {
-    "Tú":     "#2196F3",   # Azul
-    "Reunión": "#4CAF50",  # Verde
+    "Tu":      "#2196F3",   # Azul
+    "Tú":      "#2196F3",   # Azul (compat)
+    "Reunion": "#4CAF50",   # Verde
+    "Reunión": "#4CAF50",   # Verde (compat)
 }
 _DEFAULT_COLOR = "#9C27B0"  # Morado para fuentes no reconocidas
 

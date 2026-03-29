@@ -60,27 +60,27 @@ def _run_worker_briefly(worker: SlidingWindowWorker, seconds: float = 1.5):
 def test_audio_stream_defaults():
     """_AudioStream se inicializa con valores por defecto correctos."""
     s = _AudioStream(
-        name="mic", label="Tú",
+        name="mic", label="Tu",
         audio_queue=queue.Queue(),
         vad=_MockVAD(),
     )
     assert s.name == "mic"
-    assert s.label == "Tú"
-    assert len(s.audio_buffer) == 0
+    assert s.label == "Tu"
+    assert len(s.accumulating_buffer) == 0
     assert s.confirmed_text == ""
     assert s.has_speech is False
-    assert s.buffer_max_samples == int(5.0 * 16000)
+    assert s.max_buffer_samples == int(60.0 * 16000)
 
 
-def test_audio_stream_buffer_max():
-    """buffer_max_samples respeta window_duration."""
+def test_audio_stream_max_buffer():
+    """max_buffer_samples respeta max_buffer_seconds."""
     s = _AudioStream(
-        name="sys", label="Reunión",
+        name="sys", label="Reunion",
         audio_queue=queue.Queue(),
         vad=_MockVAD(),
-        window_duration=3.0,
+        max_buffer_seconds=3.0,
     )
-    assert s.buffer_max_samples == 3 * 16000
+    assert s.max_buffer_samples == 3 * 16000
 
 
 # ------------------------------------------------------------------ #
@@ -147,15 +147,15 @@ def test_solo_mic_emite_label_correcto():
     w.text_partial.connect(lambda src, txt: partial_signals.append((src, txt)))
     w.status_changed.connect(lambda _: None)
 
-    # Llamar _do_transcription directamente (sin QThread) con buffer corto → parcial
-    w._mic.audio_buffer = np.zeros(16000, dtype=np.float32)  # 1s < 3s threshold
+    # Llamar _do_transcription directamente (sin QThread)
+    w._mic.accumulating_buffer = np.zeros(16000, dtype=np.float32)
     w._mic.has_speech   = True
     w._do_transcription(w._mic)
 
     all_signals = confirmed_signals + partial_signals
     assert len(all_signals) > 0, "No se emitieron señales"
     for src, _ in all_signals:
-        assert src == "Tú", f"Label inesperado: {src!r}"
+        assert src == "Tu", f"Label inesperado: {src!r}"
 
 
 def test_dual_emite_labels_correctos():
@@ -184,7 +184,7 @@ def test_dual_emite_labels_correctos():
     if all_confirmed:
         labels = set(all_confirmed)
         # Deben aparecer solo labels válidos
-        assert labels.issubset({"Tú", "Reunión"})
+        assert labels.issubset({"Tu", "Reunion"})
 
 
 # ------------------------------------------------------------------ #
@@ -217,9 +217,9 @@ def test_buffers_independientes():
         w._drain_queue(w._system)
 
     # El buffer del mic debe tener datos, el del sistema no
-    assert len(w._mic.audio_buffer) > 0
+    assert len(w._mic.accumulating_buffer) > 0
     if w._system:
-        assert len(w._system.audio_buffer) == 0
+        assert len(w._system.accumulating_buffer) == 0
 
 
 # ------------------------------------------------------------------ #
